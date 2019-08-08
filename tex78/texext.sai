@@ -1,0 +1,52 @@
+<HTML>
+<TITLE>SAILDART</TITLE>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+</HEAD>
+<BODY bgcolor=white>
+<PRE>COMMENT ⓧ   VALID 00002 PAGES
+C REC  PAGE   DESCRIPTION
+C00001 00001
+C00002 00002	entry begin comment The (dummy) extension module of TEX.
+C00005 ENDMK
+Cⓧ;
+entry; begin comment The (dummy) extension module of TEX.
+
+In order to extend TEX without changing other modules, you can supply
+procedures for the null procedures declared here. Most of these procedures
+are called when TEX's routines come up with a case that is ordinarily
+undefined (usually when processing a node of type &quot;whatsit&quot;);
+
+require &quot;TEXHDR.SAI&quot; source_file;
+
+internal procedure initext # do this when initializing TEX;
+;
+internal procedure extop # do this when &quot;\x&quot; sensed in user input;
+;
+internal procedure dumpext(integer p) # do this in procedure dumpnodelist;
+;
+internal procedure destroyext(integer p) # do this in procedure dsnodelist;
+;
+internal procedure eqdestroyext(integer p) # do this in procedure eqdestroy;
+;
+internal procedure hpackext(integer p) # do this in procedure hpackage;
+;
+internal procedure vpackext(integer p) # do this in procedure vpackage;
+;
+internal procedure pageext(integer p) # do this in the addtopage routine;
+;
+internal procedure justext(integer p) # do this in the justification routine;
+;
+internal procedure houtext(integer p; reference real x,y) # do this in shipout;
+;
+internal procedure voutext(integer p; reference real x,y) # do this in shipout;
+;
+comment in houtext, x and y are coordinates of the reference point, while
+in voutext they are coordinates of the upper left corner;
+internal procedure finishext # do this just before terminating TEX;
+;
+end
+
+</PRE>
+</BODY>
+</HTML>

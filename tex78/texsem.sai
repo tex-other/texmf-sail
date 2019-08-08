@@ -1,0 +1,4054 @@
+<HTML>
+<TITLE>SAILDART</TITLE>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+</HEAD>
+<BODY bgcolor=white>
+<PRE>COMMENT ⓧ   VALID 00019 PAGES
+C REC  PAGE   DESCRIPTION
+C00001 00001
+C00004 00002	entry begin comment The semantics module of TEX.
+C00007 00003	Data structures for boxes.
+C00025 00004	Displaying and destroying boxes: dumpnodelist,dsnodelist,tracedump
+C00032 00005	The semantic stacks: mode,head,curnode,aux,spacefactor,prevdepth,incompleat
+C00039 00006	The page builder.
+C00046 00007	Introduction to math formula processing and data structures for mlists.
+C00070 00008	Maintaining the semantic stacks: pushnest,popnest,decodemode,dumpactivities
+C00074 00009	Font information.
+C00091 00010	Making lists into boxes: nullbox,hpackage,vpackage,hpack,vpack
+C00104 00011	Spacing and adding to the current list: initsftable,append,finishdisplay
+C00113 00012	Hyphenation (word division) routines.
+C00131 00013	The paragraph builder: hangwidth,hangbegin,justification,finishparagraph
+C00160 00014	Procedures for mmode: finishmlist,boxchar,compact,mathglue,varsymbol,
+C00177 00015	Major math mode procedures: mlist_to_hlist,evalmlist,boxfield
+C00209 00016	Data structures for \halign and \valign: alignlist,alignrecord
+C00216 00017	Alignment procedures: (init|end)align,(start|finish)(alignbox|unsetnode)
+C00230 00018	Beginning of the main procedure: maincontrol
+C00266 00019	Ending of the main procedure
+C00287 ENDMK
+Cⓧ;
+entry; begin comment The semantics module of TEX.
+
+(It is wise to read the introductory pages of TEXSYN before going very
+deeply into the following code.)
+
+The purpose of these routines is to consume the tokens supplied by
+the syntax module of TEX, and to produce the data structures for boxes
+that are periodically shipped to the output module.
+
+Like the syntax module, the semantics process is implicitly recursve,
+but the large procedures themselves are coded here in a nonrecursive
+way so that the common features are shared and so that the
+algorithms are easily expressible in low-level languages.  In other
+words, this module has a bunch of stacks too.
+
+Just as the syntax scanning routines are said to be in various &quot;states&quot;
+(e.g., middle of an input line, or skipping blanks or reading token lists),
+the semantics routines are said to be in various &quot;modes&quot; (e.g., horizontal
+mode, or verticl mode or math mode). There is a modestack for keeping track
+of the modes in partially completed activities.
+
+These routines call getnext or other scanning routines of TEXSYN in order
+to get input tokens. They call sendout to invoke the output module when
+a completed page has been built.
+
+Some short routines in this module are explicitly recursive. For example, the
+routine which prints the contents of a box uses itself, since boxes can
+be inside boxes;
+
+require &quot;TEXHDR.SAI&quot; source_file;
+internal saf integer array mem[0:memsize-1] # dynamic list memory;
+comment Data structures for boxes.
+
+What follows is a description of the semantic data structures which
+serve as interface between TEXSEM and the output module. A user of TEX
+deals with boxes and with hlists and vlists built up by gluing these
+boxes together with flexible glue. TEX's internal representation
+follows these concepts quite closely.
+
+The storage is allocated in variable-length nodes from the mem array,
+as explained in TEXSYS. The first word of each node contains a type
+field, a value field, and a link field. The type field tells what
+kind of node this is, the value field contains additional information
+depending on the type, and the link field is used to tie nodes together
+into hlists or vlists.
+;
+internaldef types=5, typed=bitsperwd-types # definition of type field;
+internaldef values=typed-links, valued=links # definition of value field;
+comment values must be ≥ links;
+internaldef type(p)=⊂field(type,mem[p])⊃  # shorthand for type field;
+internaldef value(p)=⊂field(value,mem[p])⊃  # shorthand for value field;
+
+comment Since the type of a node never exceeds 4 bits, the definition types=5
+guarantees that the first word of a multiple-word node is ≥0, in accordance
+with our memory allocation conventions. (On a machine with shorter word size
+it would be possible to make the type field smaller, by (a) using the fact
+that one-word nodes may be negative, or (b) combining types and differen-
+tiating them on the basis of other fields.)
+
+A box is either a single character, or a rule, or a vlist or hlist with
+specified glue setting and relocation. Each box has three dimensions
+	height, depth, width
+associated with it, as shown:
+
+			-----------------  ∧
+			|		|  |
+			|		|  |
+			|		| height
+			|		|  |
+			|		|  |
+      reference point--→*---baseline----|  x
+			|		|  |
+			|		| depth
+			|		|  |
+			-----------------  ∨
+	
+			&lt;-----width-----&gt;
+
+All dimensions are real values in units of points.
+
+Type 0 node: A single character. One word long.
+The value is subdivided into a font selector and a 7-bit
+character code. Dimensions of such boxes are derived from
+the font description, as explained later;
+
+internaldef charnode=0 # type code for a character box;
+
+comment
+Type 1 or 2 node: A box consisting of an hlist or vlist with glue set.
+Six words long. The value points to the first element of the list in question.
+All three box dimensions are explicitly given, as is the glueset parameter
+which weights how much stretching or shrinking is to be done. (Namely, all
+glue nodes in the hlist or vlist are to have their gluespace increased by
+glueset*gluestretch, if glueset≥0, otherwise by glueset*glueshrink.)
+A further parameter tells how much to shift this box downwards or to the right,
+depending on whether this box itself appears in an hlist or vlist, respectively;
+
+internaldef hlistnode=1 # type code for a box made from an hlist;
+internaldef vlistnode=2 # type code for a box made from a vlist;
+internaldef boxnodesize=6 # number of words to allocate for a box node;
+internaldef width(p)=⊂memreal(p+1)⊃ # width field in nodes;
+internaldef depth(p)=⊂memreal(p+2)⊃ # depth field in nodes;
+internaldef height(p)=⊂memreal(p+3)⊃ # height field in nodes;
+internaldef shiftamt(p)=⊂memreal(p+4)⊃ # amount to shift this box;
+internaldef glueset(p)=⊂memreal(p+5)⊃ # glueset field in box nodes;
+
+comment The stated height, width, and depth of a box might not be equal to
+the box's &quot;true&quot; height, width, or depth that would be determined from
+the list in the box. Therefore we must give further clarification in order
+to define the position of each box unambiguously. Here are the rules:
+In a vlist box whose upper left corner is in column x and row y, the
+first box in that vlist has the upper left corner, the next box
+has upper left corner in column x and row y-h-d (where h and d are the
+height and depth of the first box), and so on.
+In an hlist box whose reference point is in column x and row y, the
+first box in that hlist has the same reference point, the next box
+has reference point in column x+w and row y (where w is the width
+of the first box), and so on.
+Glue nodes are treated in this rule as if they were boxes having an appropriate
+height+depth (in a vlist) or an appropriate width (in a vlist).
+Note that the rule is stated in terms of upper left corners in vlists,
+but in terms of reference points in hlists.
+One consequence: If V is a vlist box in an hlist, changing
+	height(V)←height(V)+delta, depth(V)←depth(V)-delta
+would be exactly equivalent to changing
+	shiftamt(V)←shiftamt(V)+delta.
+But if V were a vlist box in a vlist, or an hlist box in an hlist, the
+stated change to V's height and depth would have no effect whatever. And if
+V were an hlist box in a vlist, the stated change would lower the contents
+of V by an amount delta (this is something you couldn't do by changing shiftamt(V)).
+Is that clear?
+
+When a box does not have its &quot;true&quot; dimensions as determined by the sublist,
+its glueset parameter will be nonzero. At least, this is true for boxes that
+can appear in math formulas.
+
+Type 3 node: A rule (solid black rectangle). Four words long, containing
+height, depth, and width as in box nodes. If any of the three dimensions
+is negative, its actual value is determined by running the rule
+up to the boundary of the innermost enclosing box. The width is never
+negative in an hlist, the height and depth are never negative in a vlist;
+
+internaldef rulenode=3 # type code for a &quot;black box&quot;;
+internaldef rulenodesize=4 # number of words to allocate for it;
+
+comment
+Type 4 node: Reserved for extensions. Such nodes should only be inserted by
+routines in the TEXEXT module. For example, there might be an extension to
+draw vectors, and this node might contain the desired coordinates;
+
+internaldef whatsitnode=4 # type code for special nodes used by extensions;
+
+comment
+Type 5 node: Glue. One word long. The value field points to a four-word
+glue node, consisting of a reference count followed by the spacing,
+streching, and shrinking parameters of the glue;
+
+internaldef gluenode=5 # type code for a node that points to glue specification;
+internaldef gluespecsize=4 # number of words allocated in glue specifications;
+internaldef gluespace(p)=⊂memreal(p+1)⊃ # normal spacing of glue;
+internaldef gluestretch(p)=⊂memreal(p+2)⊃ # stretching factor of glue;
+internaldef glueshrink(p)=⊂memreal(p+3)⊃ # shrinking factor of glue;
+define fillgluespec=(gluenode lsh typed)+(fillglue lsh valued) # specifies fillglue;
+
+comment
+Type 6 node: Leaders.  One word long. The value field points to a rule node or a box
+node containing the leaders. The next word should be a glue node which specifies
+the intended length of the leaders;
+
+internaldef leadernode=6 # type code for leaders node;
+
+comment
+Type 7 node: Kerning. Two words long, meaningful only in hlists. The &quot;gluespace&quot;
+field specifies a (normally negative) amount of glue, used in spacing between
+letters like A and V when it looks better to move them closer together;
+
+internaldef kernnode=7 # type code for kerning node;
+internaldef kernnodesize=2 # number of words in kern node;
+
+comment The following types of nodes should be ignored by the output module
+since they are meaningful only temporarily while hlists or vlists are
+being built. It is easier to let the output routine ignore them than to
+remove them from the lists.
+
+Type 8 node: Hyphenation control. One word long, meaningful only in hlists.
+If value=1, do not use automatic hyphenation in subsequent parts of the
+current list until encountering a hyphenation control node with value=0.
+Used to protect mathematical formulas;
+
+define hyphnode=8 # type code for a hyphenation control node;
+
+comment
+Type 9 node: Penalty break. One word long. The value specifies how many
+additional penalty points to charge if an hlist or vlist is broken at
+this place, in two's complement notation (it might be negative);
+
+define penaltynode=9 # type code for a penalty break node;
+define penalty(p)=
+	⊂((mem[p]lsh(bitsperwd-values-valued))ash(-bitsperwd+values))⊃;
+define infpen=⊂((1 lsh(values-1))-1)⊃ # &quot;infinite&quot; penalty;
+
+comment
+Type 10 node: Discretionary break node. One word long, meaningful only in
+hlists. Contains font and character code like a character node. Specifies
+that the hlist may be broken here, inserting the specified character
+(usually - or x) with the usual badness penalty for hyphenation;
+
+define discnode=10 # type code for discretionary break node;
+
+comment
+Type 11 node: Page eject node. One word long, meaningful only in vlists for
+the page builder or hlists for the paragraph builder, specifies where to
+break off and finish a page;
+
+define ejectnode=11 # type code for page eject node;
+
+comment
+Type 12 node: Mark node. One word long, meaningful only in vlists for the
+page builder. The value field points to the reference count of a tokenlist
+corresponding to an identification mark in the text;
+
+define marknode=12 # type code for mark node;
+
+comment
+Type 13 node: Insertion node. One word long, meaningful only in vlists for
+the page builder or hlists for the paragraph builder. The value points
+to a special node that describes a vlist to be inserted at the top or
+bottom of a page. This special node has the form of a glue specification,
+giving the characteristics of the space filled by the inserted list.
+However, the first word of the special node is not a reference count,
+it contains a pointer to the vlist in its value field and an indication of
+top (1+d) or bottom (d) in its type field, where d = 0 or 2 according as the
+insertion is in hmode (non-deferrable) or vmode (deferrable);
+
+define insnode=13 # type code for insertion node;
+
+comment
+Type 14 node: Unset node. Same length as box nodes, meaningful only
+while \halign or \valign is in progress. For halign, the width is the
+natural width, and in valign the height is the natural height, while
+the other two dimensions are equal to their true final values. The
+glueset field of unset nodes is the total gluestretch in the 
+associated list pointed to in the value field. Unset nodes will be
+changed into box nodes when alignment is completed;
+
+define unsetnode=14 # type code for unset box node;
+
+comment Links to completed boxes stored by the \save actions (\save0 thru \save9)
+get put into savedbox[&quot;0&quot;] thru savedbox[&quot;9&quot;]. Links to completed boxes for
+leaders get put into savedbox[&quot;:&quot;]. A link to the current page, to be
+called forth by the \page action, gets put into savedpage;
+
+preload_with 0; saf integer array savedbox[&quot;0&quot;:&quot;:&quot;] # pointers to saved boxes;
+integer savedpage # pointer to current page;
+
+preload_with &quot;&quot;,&quot;\hbox&quot;,&quot;\vbox&quot;,&quot;\rule&quot;,&quot;\x&quot;,&quot;\glue&quot;,&quot;\leaders&quot;,
+&quot;\kern&quot;,&quot;\hyphenation&quot;,&quot;\penalty&quot;,&quot;\discretionary&quot;,&quot;\eject&quot;,&quot;\mark&quot;,&quot;&quot;,
+&quot;\unsetbox&quot;; saf string array nodeident[0:unsetnode] # names of node types;
+comment Displaying and destroying boxes: dumpnodelist,dsnodelist,tracedump;
+
+comment Tracing is governed by the global variable &quot;tracing&quot; which has the
+octal form MMMNNNxy, where MMM tells how many items per box to dump,
+NNN specifies the maximum depth of nesting to be dumped, and x and y are further
+three-bit codes that invoke tracing as follows:
+	x land 1 means trace macro calls
+	x land 2 means put file input on screen for possible online editing
+	x land 4 means stop whenever \ddt is scanned in the input
+	y land 1 means trace whenever getting a box that wants to shrink more
+		than the glue will allow
+	y land 2 means trace whenever getting a page to send to \output
+	y land 4 means trace whenever \ddt is scanned in the input.
+The normal value of tracing is 0. If MMM=0, 5 items per box are dumped;
+
+string simple procedure rfmt(real x) # output format used for rule dimensions;
+return(if x≥0 then cvf(x) else &quot; *&quot;);
+
+recursive procedure dumpnodelist(integer p; string indent; integer thresh,n);
+begin comment This diagnostic routine displays the contents of a list of
+nodes, each line of output being preceded by &quot;indent&quot;, unless the length of
+indent is more than thresh. (Thus, by setting thresh low you restrict the
+output to top level boxes.) Furthermore, only n items per box are shown;
+integer t,v,i,m,c;
+if length(indent)&gt;thresh then return;
+c←0;
+while p do
+	begin print(nextline,indent);
+	if p&lt;0 or p≥memsize then
+		begin print(&quot;Bad link, dump aborted.&quot;); done;
+		end;
+	if (c←c+1)&gt;n then
+		begin print(&quot;etc.&quot;); return;
+		end;
+	t←field(type,m←mem[p]);v←field(value,m);
+	if t&gt;unsetnode then print(&quot;Unknown node type!&quot;)
+	else	begin
+		print(nodeident[t]);
+		case t of begin
+		[charnode][discnode] begin print(&quot;\:&quot;&amp;(&quot;@&quot;+(v lsh -7)));
+		v←v land '177;
+		if v&gt;&quot; &quot; and v≤&quot;z&quot; then print(&quot; &quot;&amp;v) else print(&quot; '&quot;,cvos(v)) end;
+		[hlistnode][vlistnode][unsetnode] begin
+		print(&quot;(&quot;,cvf(height(p)),&quot; +&quot;,cvf(depth(p)),&quot;)x&quot;,cvf(width(p)));
+		if glueset(p) then print(&quot;, glueset&quot;,cvf(glueset(p)));
+		if shiftamt(p) then print(&quot;, shifted&quot;,cvf(shiftamt(p)));
+		dumpnodelist(v,indent&amp;&quot;.&quot;,thresh,n); end;
+		[rulenode] print(&quot;(&quot;,rfmt(height(p)),&quot; +&quot;,rfmt(depth(p)),&quot;)x&quot;,
+			rfmt(width(p)));
+		[gluenode][insnode] if v&lt;memsize then
+			begin if t=insnode then
+				begin if type(v) land 1 then print(&quot;\topinsert&quot;)
+				else print(&quot;\botinsert&quot;);
+				if type(v) land 2 then print(&quot; (can wait)&quot;);
+				end;
+			print(cvf(gluespace(v)),
+			if gluestretch(v) then &quot; plus&quot;&amp;cvf(gluestretch(v))else null,
+			if glueshrink(v) then &quot; minus&quot;&amp;cvf(glueshrink(v))else null);
+			if t=insnode then
+				dumpnodelist(value(v),indent&amp;&quot;.&quot;,thresh,n);
+			end
+		else print(&quot;:Impossible spec!&quot;);
+		[whatsitnode] dumpext(p);
+		[leadernode] dumpnodelist(v,indent&amp;&quot;.&quot;,thresh,n);
+		[kernnode] print(cvf(gluespace(p)));
+		[hyphnode] print(v);
+		[penaltynode] print(penalty(p));
+		[ejectnode];
+		[marknode] print(&quot;{&quot;,dumptokens(link(v)),&quot;}&quot;);
+		else comment this really can't happen;
+		  end;
+		end;
+	p←link(p);
+	end;
+end;
+
+internal recursive procedure dsnodelist(integer p) # frees a list of boxes;
+begin comment This procedure returns the list and its sublists to free storage;
+integer t,v,i,m,q;
+while p do
+	begin q←link(p);
+	case t←field(type,m←mem[p]) of begin
+	[charnode][hyphnode][penaltynode][discnode][ejectnode]
+	freeavail(p);
+	[leadernode] begin dsnodelist(field(value,m));freeavail(p);end;
+	[hlistnode][vlistnode] begin dsnodelist(field(value,m));
+	freenode(p,boxnodesize); end;
+	[rulenode] freenode(p,rulenodesize);
+	[gluenode] begin delgluelink(field(value,m)); freeavail(p) end;
+	[whatsitnode] destroyext(p);
+	[kernnode] freenode(p,kernnodesize);
+	[insnode] begin v←field(value,m); dsnodelist(value(v));
+	freenode(v,gluespecsize); freeavail(p) end;
+	[marknode] begin delrclink(field(value,m)); freeavail(p) end;
+	else confusion
+	  end;
+	p←q;
+	end;
+end;
+
+procedure tracedump(integer p) # calls dumpnodelist with tracing threshold;
+dumpnodelist(p,null,(tracing lsh -6)land '777,
+if tracing≥'100000 then (tracing lsh-9)land '777 else 5);
+comment The semantic stacks: mode,head,curnode,aux,spacefactor,prevdepth,incompleat;
+
+comment The state of semantic processing appears in the following stacks,
+maintained with &quot;convention #1&quot; (cf. the discussion of input stacks in TEXSYN);
+
+internal integer nestptr # points to first unused in semantic stacks;
+internaldef nestsize = 20 # max number of things going on simultaneously;
+
+internal saf integer array modestack[0:nestsize-1]; internal integer mode
+	# current activity modes;
+internal saf integer array headstack[0:nestsize-1]; internal integer head
+	# pointers to list heads for lists being constructed;
+internal saf integer array curndstack[0:nestsize-1]; internal integer curnode
+	# pointers to nodes most recently added to the current lists;
+internal saf real array auxstack[0:nestsize-1]; internal real aux;
+	# auxiliary parameter (either spacefactor or prevdepth or incompleatnoad);
+internaldef prevdepth=⊂aux⊃, spacefactor=⊂aux⊃,
+	incompleatnoad=⊂memory[location(aux),integer]⊃;
+comment At each level of processing we are in one of six modes:
+	vmode	vertical mode (the page builder)
+	hmode	horizontal mode (the paragraph builder)
+	mmode	displayed formula mode
+	-vmode	restricted vertical mode (not the page builder)
+	-hmode	restricted horizontal mode (not the paragraph builder)
+	-mmode	math formula mode (not displayed).
+These modes are assigned internal codes so that it is easy to switch to the
+appropriate action by branching on abs(mode)+curcmd;
+
+internaldef vmode=1 # vertical mode;
+internaldef hmode=2+maxopcode # horizontal mode;
+internaldef mmode=3+2*maxopcode # math mode;
+
+comment The purpose of the semantic routines is generally to construct lists
+of box nodes: in vertical mode we build vlists and in horizontal mode we
+build hlists. (In math mode, mlists are formed and converted into hlists or
+vlists by subsequent processing.) These lists are generally queues (first-in-
+first-out), so two pointers head and curnode are kept, with links pointing
+away from head:
+
+	head				curnode
+	  ↓				   ↓
+	-------    -------    -------    -------
+	|  | *+--→ |  | *+--→ |  | *+--→ |  |  |
+	-------    -------    -------    -------
+
+In an empty list we have curnode=head and mem[head]=0. In a one-node list,
+curnode points to the single node, mem[head]=curnode, and link(curnode)=0.
+The one-word node pointed to by &quot;head&quot; is allocated upon entering a new
+semantic level and freed upon leaving it.
+
+The following SAIL macro can be used to append a new one-word node, containing
+the value x, to the current list;
+
+define store(x)=⊂begin integer o; o←curnode; getavail(curnode);
+	mem[o]←mem[o]+curnode; mem[curnode]←x; end⊃ # stores new item x;
+comment Here x should have 0 in its link field.
+
+An auxiliary real parameter is also maintained at each level of nesting.
+In horizontal mode this is the &quot;spacefactor&quot; which is used to multiply
+the amount of glue stretching and shrinking in variable spaces -- this factor
+is normally 1.0, but it gets larger after periods and commas, etc. 
+In vertical mode the auxiliary parameter is called prevdepth, it is the
+depth of the most recent box on the list. This is used to calculate
+inter-line glue. If there are no boxes on the list, or if a rule follows
+the most recent box, prevdepth is set to the special value &quot;pflag&quot;, indicating
+that no inter-line glue should precede the next box. In math mode, the
+auxiliary parameter is type integer and called &quot;incompleatnoad&quot;. It is normally zero,
+but after passing \above or a similar operation it points to the partially
+assembled mlist containing the numerator.
+;
+internaldef flag=⊂(1 rot -1)⊃ # most significant bit of word;
+internaldef fflag=⊂(3 rot -2)⊃ # two most significant bits of word;
+define pflag=⊂(0.0 lor flag)⊃ # flag, but treated as type real by the compiler;
+comment The page builder.
+
+Routines to build pages and periodically emit them to the output occupy
+the lowest level of semantic nesting (nestptr=0). These routines
+deal will several special variables and lists.
+
+First there is &quot;pagesize&quot;, which is set to the current value of \vsize
+when the first entry is about to be placed onto a page. Similarly,
+&quot;pagedepthmax&quot; is set to the current value of \maxdepth.
+
+The main vlist for the current page starts at pagehead (a fixed location in
+mem), and the most-recently-added node is pointed to by pagetail. This
+list is distinct from the list corresponding to head and curnode when
+in vmode -- the latter list contains contributions which are to be added
+to the current page, but some of them might not get in immediately.
+Sometimes lines are taken off the current page and inserted at the beginning
+of this contribution-list.
+
+Besides the current page list and the contribution list there is also a
+waiting list, consisting of insert nodes for vlists that didn't fit
+on the current page. The waiting list is appended to the front of the
+contribution list each time a new page is started. The relevant pointers
+to this list are waitinghead and waitingtail.
+
+The currently best known place to break the current page is maintained in
+the pointer variable curbreak (i.e., curbreak points to the final node
+before the break), and the resulting badness is called curbadness. The
+height and depth of the current page vlist are stored in pageheight and
+pagedepth. The total glue variability is stored in pagestretch and pageshrink;
+
+real pagesize # desired height of current page;
+real pageheight # actual height of current page;
+real pagedepth # actual depth of current page;
+real pagedepthmax # bound on allowable page depth;
+real pagetopbl # bound on position of first baseline;
+real pagestretch, pageshrink # total glue variability on current page;
+integer pagetail # most recent node on current page;
+integer waitingtail # most recent node on waiting list for inserted vlists;
+integer curbreak # best known place to break on current page;
+real curbadness # badness rating if break occurs at curbreak;
+define contrib=⊂mem[contribhead]⊃ # first contribution;
+
+comment The routine addtopage is used to take nodes from the contribution list and
+append them to the current page list, calculating the best place to break.
+As soon as pagelength exceeds pagesize+pageshrink, the current page is
+ejected at the best-found place and the output routine is invoked. Then
+addtopage resumes, until the contribution list has been emptied.
+
+The following procedure is used in the addtopage routine when a
+permissible break is encountered up to and including node curtail.
+It updates curbreak and curbadness and returns true if it is time to
+output the page up to and including node curbreak;
+
+boolean procedure testpagebreak(real penalt);
+begin real glue,badness;
+if pagehead=pagetail then return(false);
+if pageheight&gt;pagesize then
+	begin glue←pageshrink; if glue≤0.0001 then glue←.0001;
+	if pageheight&gt;pagesize+glue then
+		begin if curbreak=0 then curbreak←pagetail;
+		comment In this case the page will be too long, but we took
+			the first possible break;
+		return(true);
+		end;
+	badness←(pageheight-pagesize)/glue;
+	end
+else	begin glue←pagestretch; if glue≤0.0001 then glue←.0001;
+	badness←(pagesize-pageheight)/glue;
+	end;
+badness←badness^3+penalt;
+if badness≤curbadness then
+	begin curbreak←pagetail; curbadness←badness;
+	end;
+return(false);
+end;
+
+comment The following global variables are of concern to the output routine;
+
+saf internal integer array kount[&quot;0&quot;:&quot;9&quot;];
+comment \counts (kount[&quot;0&quot;] is page number used in messages to user);
+boolean outputdormant # true if the user output routine is not active;
+integer topmark,botmark # pointers to the mark tokenlists at top and bottom of page;
+integer outputroutine # pointer to the user output routine;
+internaldef pagememsize=5 # number of page parameters;
+internal saf real array pagemem[0:pagememsize-1] # page parameters;
+internaldef hsizemem=0 # location where hsize is stored in pagemem;
+internaldef vsizemem=1 # location where vsize is stored in pagemem;
+internaldef maxdepthmem=2 # location where maxdepth is stored in pagemem;
+internaldef parindentmem=3 # location where parindent is stored in pagemem;
+internaldef topbaselinemem=4 # loc where topbaseline is stored in pagemem;
+comment Introduction to math formula processing and data structures for mlists.
+
+When TEX first reads a formula enclosed between $'s, it constructs an mlist which
+is essentially a tree structure representing that formula. (An mlist is
+linear, but the tree structure comes in since mlists can appear in mlists.)
+The entire formula is &quot;parsed&quot; into such a tree before any of the processing
+is done, because the current style of type is not always known while an
+mlist is being scanned. For example, in $a+b \over c+d$ the fact the a+b will
+be in script size is not discovered until \over has occurred.  Each element of the
+mlist is classified as, e.g., a relation, a binary operator, an open parenthesis,
+etc., or as a construct like sqrt which must be built up. Subscripts and
+superscripts are attached to these mlist elements, as mlists themselves.
+
+After the formula has been entirely input, the mlst is evaluated, i.e.,
+converted to an hlist.  This is controlled by a recursive procedure with
+reasonably simple structure: First all sub-mlists are evaluated, according to
+the appropriate style determined from the outside in. Then the constructed
+subformulas are built, using a combination of hlists and vlists, and
+sub/superscripts are attached. Finally spacing is inserted, together with
+any necessary penalty break nodes, and an hlist results.
+
+One consequence of this two-pass operation is that if \mathrm, say, appears
+anywhere within a formula, it applies to the whole formula.  (The three fonts
+defined by \mathrm are &quot;sticky&quot;, i.e. their influence does not disappear
+outside the block in which they occur.)
+
+The math routines refer to 10 fonts (\mathrm, \mathit, \mathsy in text
+size, script size, and script-script size, plus the \mathex font), and these
+should have special characters in fixed positions as discussed in the TEX user
+manual. Actually TEX keeps an internal table of 12 fonts, with mathfonttable(3),
+(7), and (11) all equal to the number of the \mathex font.
+
+Conversion of an mlist to an hlist takes place in eight different styles:
+	dispstyle	used in displayed formulas
+	textstyle	used in formulas within a text line
+	scriptstyle	used in sub/superscripts
+	scriptscriptstyle  used in sub/superscripts of sub/superscripts
+plus a variant of these styles used when the formula is under a bar line. (In
+the variant style, superscripts are set somewhat lower.) There are three
+sizes of type, text size being used for both dispstyle and textstyle.
+The following tables specify the dependence of size and style on context;
+
+internaldef dispstyle=0,textstyle=1,scriptstyle=2,scriptscriptstyle=3;
+comment Adding 4 to the style code gives the code for the variant style;
+
+internaldef mathfonttable(f)=⊂eqtb[f+hashsize+256]⊃ # font numbers for math
+typesetting, depending on type size:
+	(0) is text size rm,
+	(1) is text size it,
+	(2) is text size sy,
+	(3) is ex,
+	(4) is script size rm, etc., for 0≤f≤11;
+define textsize=0,scrsize=4,scrscrsize=8;
+preload_with textsize,textsize,scrsize,scrscrsize,
+	textsize,textsize,scrsize,scrscrsize; saf integer array fontsize[0:7] #
+		the size associated with a given style;
+
+preload_with scriptstyle,scriptstyle,scriptscriptstyle,scriptscriptstyle,
+	scriptstyle+4,scriptstyle+4,scriptscriptstyle+4,scriptscriptstyle+4;
+	saf integer array scrstyle[0:7] # the superscript style associated
+		with a given style;
+preload_with dispstyle+4,textstyle+4,scriptstyle+4,scriptscriptstyle+4,
+	dispstyle+4,textstyle+4,scriptstyle+4,scriptscriptstyle+4;
+	saf integer array undstyle[0:7] # the variant style associated with
+		a given style;
+preload_with textstyle,scriptstyle,scriptscriptstyle,scriptscriptstyle,
+	textstyle+4,scriptstyle+4,scriptscriptstyle+4,scriptscriptstyle+4;
+	saf integer array numstyle[0:7] # numerator style associated with
+		a given style;
+preload_with textstyle+4,scriptstyle+4,scriptscriptstyle+4,scriptscriptstyle+4,
+	textstyle+4,scriptstyle+4,scriptscriptstyle+4,scriptscriptstyle+4;
+	saf integer array denomstyle[0:7] # denominator style associated with
+		a given style;
+
+comment Now let us consider the internal representation of an mlist. For purposes
+of this documentation, mlist elements are called noads, with apologies to English
+language purists.
+
+Most noads are four words long, having three major one-word subfields called
+	operand, supscr, subscr.
+Each of these major subfields is either zero or an encoded math character
+or a pointer to an mlist or a pointer to a box node. During the processing,
+encoded math characters and mlist pointers become converted to box
+pointers. Mlist pointers are identified by having the two most significant
+bits 11. Math characters are identified by having sign bit 1, next bit 0, and
+with the least significant 9 bits containing the actual character code:
+	codes '000 thru '177 stand for the \mathrm font
+	codes '200 thru '377 stand for the \mathit font
+	codes '400 thru '577 stand for the \mathsy font
+	codes '600 thru '777 stand for the \mathex font
+where the actual font has text size, script size, or script-script size
+according to context. Thus, for example, the subfield '400000000301 stands
+for italic letter A. (A complete table of TEX font codes appears in the
+user manual.)
+
+The subscr and supscr fields refer to the subscript and/or superscript
+attached to this noad, if any. The operand field refers to the main-line
+character(s) associated with this noad. The type of noad is used mostly
+to control spacing in the formula: for example, a box noad followed by an
+op noad (possibly separated by non-mlist noads) will eventually be
+separated by a &quot;thin space&quot;.
+
+Type 0 noad: Box or character. The operand is an ordinary character or a
+	possibly complex box, treated as a normal math symbol.
+	If the value field of this noad is 1, the box will be raised or
+	lowered so that its center occurs at the axis of the formula
+	(the fraction-line position).
+Type 1 noad: Op. The operand is an operator like lim or log, or a single character
+	from \mathex font like an integral sign or summation sign.
+	If the value field of this noad is 1, the limits to this operator
+	will be placed nonstandardly in display style (i.e., at the right
+	instead of centered or vice-versa).
+Type 2 noad: Bin. The operand is a binary operator like &quot;+&quot;.
+Type 3 noad: Rel. The operand is a relational symbol like &quot;=&quot;.
+Type 4 noad: Opener. The operand is a left-bracket symbol like &quot;(&quot;.
+Type 5 noad: Closer. The operand is a right-bracket symbol like &quot;)&quot;.
+Type 6 noad: Punct. The operand is a punctuation symbol like &quot;,&quot;.
+;
+internaldef boxnoad=0, opnoad=1, binnoad=2, relnoad=3, opennoad=4, closenoad=5,
+	punctnoad=6;
+define operand(p)=⊂mem[p+1]⊃, supscr(p)=⊂mem[p+2]⊃, subscr(p)=⊂mem[p+3]⊃;
+define supdelta=supmrk-2 # supscr(p)=mem[p+supmrk-supdelta], subscr(p) is analogous;
+define noadsize=4;
+
+comment The next few noad types represent operators that will be applied to their
+operands and converted to box noads before spacing is done.
+Type 7 noad: Sqrt. The operand will be preceded by a radical sign of appropriate
+	size and overbarred.
+Type 8 noad: Overline. The operand will be overbarred.
+Type 9 noad: Underline. The operand will be underbarred.
+Type 10 noad: Accent. The accent (which is specified in the value field as a
+	9-bit code) will be placed over the operand, centered and moved right
+	according to the italic shift of the first character of the operand.
+Type 11 noad: Above. This noad has 6 words instead of 4. The supscr and subscr
+fields hold numerator and denominator, while the operand field is replaced by
+the thickness of the desired rule. The two additional words hold left and
+right delimiters to be placed around the completed construct.
+;
+internaldef sqrtnoad=7,overnoad=8,undernoad=9,accentnoad=10,abovenoad=11;
+define aboverule(p)=⊂memreal(p+1)⊃;
+define ldelim(p)=⊂mem[p+4]⊃, rdelim(p)=⊂mem[p+5]⊃;
+
+comment &quot;Delimiters&quot; used in abovenoads and in the next two types of noads
+are given in 18-bit code, as two juxtaposed 9-bit math characters. The
+lefthand character refers to a smaller size variant of the symbol, when
+it exists (e.g. a normal left parenthesis found in the \mathrm font), and
+the righthand character refers to the larger size variants found in the
+\mathex font. If the delimiter field is zero, the delimiter is blank,
+which essentially means 2/3 of a thin space.
+
+Type 12 noad: Left. The operand specifies a delimiter, in the format just
+described. The supscr and subscr fields will remain zero, but they are
+present in order to allow easy conversion of leftnoads to opennoads.
+Type 13 noad: Right. Same as leftnoads, but eventually converted to closenoads;
+
+internaldef leftnoad=12,rightnoad=13;
+
+comment The final noad types specify insertions of boxes and glue and
+penalties and style changes, etc. into mlists.
+Type 14 noad: Node. One word long, the value field if nonzero points to a gluenode
+or penaltynode or discnode or ejectnode (or possibly a whatsitnode). Such a
+noad is ignored by the math spacing routine, simply passed along into
+the final hlist.
+Type 15 noad: Style. One word long, the value field specifies a style to
+be applied to the following noads (unless overridden by another stylenoad).
+This sort of noad is also used to indicate context-dependent variable glue
+specified by the TEX user (e.g. thick and thin and quad spaces);
+
+internaldef nodenoad=14, stylenoad=15;
+internaldef thinspace=8,thickspace=9,quadspace=10,negthinspace=11,negthickspace=12,
+negopspace=13,userspace=14,nospace=6,opspace=7,thspace=15,negthspace=16;
+comment &quot;nospace&quot; is used only in the array spacetable
+which controls inter-element spacing in an mlist;
+
+comment The following procedures illustrate the data structure described above.
+They print out the top levels of an mlist, in a manner analogous to the
+procedures dumpnodelist and tracedump;
+
+forward recursive procedure dumpnoadlist(integer p;string indent;integer thresh,n);
+
+recursive procedure dumpnoadfield(integer p; string indent; integer thresh,n);
+begin comment The procedure, which is called only by the procedure dumpnoadlist,
+displays the equivalent of a field in a noad;
+if length(indent)&gt;thresh then return;
+if p=0 then return;
+if p&gt;0 then dumpnodelist(p,indent,thresh,n) comment p is pointer to ordinary node;
+else if (p lsh 1)&lt;0 then dumpnoadlist(p land ((1 lsh infod)-1),indent,thresh,n)
+	comment p points to an mlist;
+else print(nextline,indent,&quot;'&quot;,cvos(p land '777)) # p is a math character;
+end;
+
+recursive procedure dumpnoadlist(integer p; string indent; integer thresh,n);
+begin comment This diagnostic routine is analogous to dumpnodelist, except
+that p points to an mlist;
+integer c,t,m,v;
+if length(indent)&gt;thresh then return;
+c←0;
+while p do
+	begin print(nextline,indent);
+	if p&lt;0 or p≥memsize then
+		begin print(&quot;Bad link, dump aborted.&quot;); done;
+		end;
+	if (c←c+1)&gt;n then
+		begin print(&quot;etc.&quot;); return;
+		end;
+	t←field(type,m←mem[p]);v←field(value,m);
+	case t of begin
+	[boxnoad][opnoad][binnoad][relnoad][opennoad][closenoad][punctnoad]
+	[sqrtnoad][overnoad][undernoad][accentnoad][abovenoad] begin
+	print(case t of(&quot;box&quot;,&quot;op&quot;,&quot;bin&quot;,&quot;rel&quot;,&quot;open&quot;,&quot;close&quot;,&quot;punct&quot;,
+	&quot;sqrt&quot;,&quot;over&quot;,&quot;under&quot;,&quot;accent&quot;,&quot;above&quot;),&quot;noad&quot;);
+	if v then print(v);
+	if t=abovenoad then print(cvf(aboverule(p)),&quot;, leftdelim'&quot;,
+		cvos(ldelim(p)),&quot;, rightdelim'&quot;,cvos(rdelim(p)))
+	else dumpnoadfield(operand(p),indent&amp;&quot;.&quot;,thresh,n);
+	if supscr(p) then dumpnoadfield(supscr(p),indent&amp;&quot;^&quot;,thresh,n);
+	if subscr(p) then dumpnoadfield(subscr(p),indent&amp;&quot;↓&quot;,thresh,n); end;
+	[leftnoad][rightnoad] print(case t-leftnoad of(&quot;left&quot;,&quot;right&quot;),
+	&quot;delimiter '&quot;,cvos(operand(p)));
+	[nodenoad] if v then dumpnodelist(v,indent, thresh, n);
+	[stylenoad] print(&quot;stylenoad&quot;, v);
+	  else print(&quot;Unknown noad type!&quot;) end;
+	p←link(p);
+	end;
+end;
+
+procedure tracedumpmath(integer p) # calls dumpnoadlist with tracing threshold;
+dumpnoadlist(p,null,(tracing lsh -6)land '7,
+if tracing≥'1000 then tracing lsh -9 else 5);
+
+comment Many of the characters used in math mode are predefined control
+sequences associated with the &quot;mathonly&quot; command. For example, the TEXPRE
+module contains the statement
+	identer(&quot;lfloor&quot;,mathonly,opn('542))
+which means that the control sequence \lfloor will stand for the character
+'542 (namely '142 in the \mathsy font), and will be classified as a
+left bracket (an opennoad). But ordinary characters also are given a
+special interpretation in math mode -- for example, letters are treated
+as italic, but digits are not, and some special symbols are taken from
+the \mathsy font. The following tables are used for this input conversion;
+
+internaldef bin(x)=⊂x+(binnoad lsh 9)⊃, op(x)=⊂x+(opnoad lsh 9)⊃,
+	rel(x)=⊂x+(relnoad lsh 9)⊃, opn(x)=⊂x+(opennoad lsh 9)⊃,
+	cls(x)=⊂x+(closenoad lsh 9)⊃, punct(x)=⊂x+(punctnoad lsh 9)⊃;
+preload_with bin('401),rel('443),'213,'214,bin('536),'472,'217,'231,
+		comment null,down,alpha,beta,meet,not,epsilon,pi;
+	'225,'215,'216,op('563),bin('406),bin('410),'461,'245,
+		comment lambda,gamma,delta,integral,plsmns,circplus,infinity,partl;
+	rel('432),rel('433),bin('534),bin('533),'470,'471,bin('412),rel('444),
+		comment cont_in,contains,cap,cup,for_all,exists,circtms,dblarrow;
+	'465,rel('441),rel('430),rel('434),rel('424),rel('425),rel('421),bin('537),
+		comment underline,right,tilde,uneq,lseq,gteq,equiv,join;
+	'463,cls('41),'541,'561,'577,'45,'46,cls('47),
+		comment space,exc,dblquotes,sharp,dollar,percent,ampersand,apost;
+	opn('50),cls('51),'52,bin('53),punct('54),bin('400),'56,'57,
+		comment left_paren,right_paren,astrsk,plus,comma,minus,period,slash;
+	'60,'61,'62,'63,'64,'65,'66,'67,
+		comment 0,1,2,3,4,5,6,7;
+	'70,'71,'72,punct('73),rel('74),rel('75),rel('76),cls('77),
+		comment 8,9,colon,semicolon,less,equal,greater,query;
+	'574,'301,'302,'303,'304,'305,'306,'307,
+		comment at,A,B,C,D,E,F,G;
+	'310,'311,'312,'313,'314,'315,'316,'317,
+		comment H,I,J,K,L,M,N,O;
+	'320,'321,'322,'323,'324,'325,'326,'327,
+		comment P,Q,R,S,T,U,V,W;
+	'330,'331,'332,opn('133),bin('404),cls('135),rel('442),rel('440),
+		comment X,Y,Z,left_bracket,backslash,right_bracket,up,left;
+	opn('140),'341,'342,'343,'344,'345,'346,'347,
+		comment rev_apostrophe,a,b,c,d,e,f,g;
+	'350,'351,'352,'353,'354,'355,'356,'357,
+		comment h,i,j,k,l,m,n,o;
+	'360,'361,'362,'363,'364,'365,'366,'367,
+		comment p,q,r,s,t,u,v,w;
+	'370,'371,'372,opn('546),'552,bin('405),cls('547),bin('017);
+		comment x,y,z,left_brace,absolute,diamond,rightbrace,hat;
+	saf integer array mathdecode[0:'177] # decoding table for SUAI characters;
+
+comment The following variables are used to govern the layout of displayed
+equations. Processing of displays is a relatively straightforward addition
+to the processing of math formulas in text lines, most of the code for this
+appears in procedure &quot;finishdisplay&quot;;
+
+integer eqnobox # points to box containing an equation number, if present;
+real abovedisplaywidth # amount of text on the line before a displayed equation
+	(if small enough, the dispskip glue will be omitted over the equation);
+comment Maintaining the semantic stacks: pushnest,popnest,decodemode,dumpactivities;
+
+simple procedure pushnest # store current semantic status, begin a new (empty) list;
+begin if nestptr≥nestsize then overflow(nestsize);
+modestack[nestptr]←mode;
+headstack[nestptr]←head;
+curndstack[nestptr]←curnode;
+auxstack[nestptr]←aux;
+getavail(head); mem[head]←0; curnode←head;
+nestptr←nestptr+1;
+end;
+
+simple procedure popnest # restore previous semantic status;
+begin nestptr←nestptr-1 # This can't go negative, as page builder never quits;
+freeavail(head) # N.B. no pointers to this node should remain;
+mode←modestack[nestptr];
+head←headstack[nestptr];
+curnode←curndstack[nestptr];
+aux←auxstack[nestptr];
+end;
+
+simple string procedure decodemode(integer m);
+if m&gt;0 then return(case (m-vmode)div(maxopcode+1) of
+	(&quot;vertical&quot;,&quot;horizontal&quot;,&quot;displayed math&quot;))
+else return(case(-m-vmode)div(maxopcode+1) of
+	(&quot;restricted vertical&quot;,&quot;restricted horizontal&quot;,&quot;math&quot;));
+
+simple procedure dumpactivities # show what TEX is doing;
+begin comment This diagnostic procedure prints the partial lists being built
+by TEX on each level of the semantic stacks;
+integer ptr,md;
+pushnest; popnest # stores top level variables in the arrays;
+for ptr←nestptr step -1 until 0 do
+	begin print(nextline,&quot;ⓧⓧⓧ &quot;,decodemode(md←modestack[ptr]));
+	if abs(md)=vmode and auxstack[ptr] xor pflag then
+		print(&quot;, prevdepth&quot;,cvf(auxstack[ptr]));
+	if abs(md)=hmode then print(&quot;, spacefactor&quot;,cvf(auxstack[ptr]));
+	if abs(md)=mmode then
+		begin if auxstack[ptr] then
+			begin print(&quot; with incompleatnoad:&quot;);
+			tracedumpmath(memory[location(auxstack[ptr]),integer]);
+			print(nextline);
+			end;
+		tracedumpmath(mem[headstack[ptr]]);
+		end
+	else tracedump(mem[headstack[ptr]]);
+	end;
+print(nextline,&quot;ⓧⓧⓧ current page:&quot;); tracedump(mem[pagehead]);
+if waitingtail≠waitinghead then
+	begin print(nextline,&quot;ⓧⓧⓧ holdovers:&quot;);
+	tracedump(mem[waitinghead]);
+	end;
+print(nextline,&quot;ⓧⓧⓧ nesting level &quot;,(curlev-level1)lsh -idlevd);
+end;
+comment Font information.
+
+Each font used by TEX has an associated font information file containing
+n+1 binary words of packed information. The first of these n+1 words
+tells what n is, and the next n words contain the real font information
+specified below. The name of this file is obtained by appending an extension
+code to the font file name, depending on the output device being used. For
+example, one of the fonts for the A.I.Lab's Xerox Graphics Printer is
+CMR10.FNT, and the TEX-oriented font information appears on file CMR10.TFX.
+
+The first 128 words of the real font information go into TEX's array
+fontinfo[128f:128f+127]. There is one word per 7-bit character, packed as follows:
+
+	6 bits for width
+	4 bits for height
+	4 bits for depth
+	5 bits for ligatures
+	6 bits for miscellaneous
+	6 bits for devicewidth
+	1 bit zero (may be used in TEXOUT to mark which characters actually occur)
+
+Actually these fields do not give the character width, height, etc. directly,
+they are indices into a secondary table. Thus, up to 64 different widths may appear
+among the 128 characters of a single font, and up to 16 different heights, etc.
+The next six words of the font information tell exactly how many different
+widths, heights, ..., devicewidths appear (actually if the entry is m it means
+that each character has a number between 0 and m-1 in the corresponding field).
+Suppose these words have the values nw,nh,nd,nl,nm,ndw, respectively. Then
+the next nw words specify the widths of types 0, 1, ..., nw-1 as real numbers,
+the next nh words specify the heights, and then come the nd depths.
+(The real numbers are in units of points, as in all TEX internal measurements.)
+
+Ligatures are represented as follows. Suppose e.g. that the 5-bit ligature entry
+for some character is l. Then all ligatures beginning with c are represented in
+locations l,l+1,... of the secondary table, up to and including the first negative
+word. The lower 18 bits of each such word contain the second character of the
+ligature, and the upper 18 bits (except for sign) contain the 7-bit code c
+to substitute for the two given characters. However, if c turns out to be more
+than 7 bits ('200 or more), it is a kern specification: the amount of glue
+which appears in location c-'200 relative to the present location in the
+secondary font information is to appear between these two characters.
+
+The miscellaneous field is used by TEX primarily in setting math formulas. It gives
+spacing corrections to be used at the right of italic letters and integral signs,
+etc., so that superscripts and such things don't run into each other and so
+that built-up characters like extra-large parentheses and square-root signs
+do run into each other. More details about this field are given below.
+
+In mathematical extension (&quot;\mathex&quot;) fonts, the ligature field is used in a
+different way,to specify a sequence of increasingly large variants
+of certain characters. Such fonts also have a different interpretation for
+the miscellaneous field, as explained below.
+
+The devicewidth entries tell how many units of horizontal space the output
+device will automatically advance after printing this character. This field
+is probably the only part of the font information that will change from
+device to device, since most of TEX's computations are device-independent.
+
+After these nw+nh+nd+nl+nm+ndw words come several other important parameters
+used by TEX:
+
+slant		the amount of italic slant 
+	(e.g. slant=.25 means that when going up one unit, go .25 units to the
+	right--this is used in placing accents over characters)
+space		a real number that says how wide blank spaces are
+	(Note that TEX doesn't use character number '40 for spaces, that character
+	can be non-blank in the font)
+spacestretch	the stretch component of the glue for spacing
+spaceshrink	the shrink component of the glue for spacing
+xheight		the height of lowercase &quot;x&quot; (default positioning for accents)
+quad		the width of one &quot;em&quot;
+
+Further parameters, possibly depending on the device, or further information
+about mathematics symbols, complete the font information. For example, on
+an XGP there is a parameter that specifies the number of pixels above the
+baseline for the tallest character in the font. Three words are allowed for
+device parameters, then come the math parameters if any;
+
+internaldef fmemsize=3200 # size of font memory for secondary tables;
+internal saf integer array fmem[0:fmemsize-1] # font memory for secondary font info;
+internal integer fmemptr # first unused location in fmem;
+internaldef fmemreal(k)=⊂memory[location(fmem[k]),real]⊃;
+
+internal saf integer array fontinfo[0:'7777] # primary font information table;
+internal saf integer array wdbase,htbase,dpbase,lgbase,msbase,dwbase,parbase[0:31]
+	# base addresses in fmem for secondary font tables;
+
+internaldef wdd=0,wds=6,htd=6,hts=4,dpd=10,dps=4,lgd=14,lgs=5,msd=19,mss=6,
+	dwd=25,dws=6;
+internaldef charwd(f,t)=⊂fmemreal(wdbase[f]+field(wd,t))⊃
+	# width in font f, fontinfo t;
+internaldef charht(f,t)=⊂fmemreal(htbase[f]+field(ht,t))⊃
+	# height in font f, fontinfo t;
+internaldef chardp(f,t)=⊂fmemreal(dpbase[f]+field(dp,t))⊃
+	# depth in font f, fontinfo t;
+
+internaldef fontpar(f,t)=⊂fmemreal(parbase[f]+t)⊃ # parameter no. t in font f;
+internaldef slant=0,spacewd=1,spacestr=2,spaceshr=3,xheight=4,quad=5;
+internaldef device1=6,device2=7,device3=8;
+
+comment Mathematics fonts used as \mathsy and \mathex contain important additional
+parameter information. In a \mathsy font, the extra parameters (following the
+three device parameters) for this size of type are called:
+	num1,num2,num3	amount to raise baseline of numerators in display or
+				nondisplay or nondisplay-atop styles, respectively
+	denom1,denom2	amount to lower baseline of denominators
+	sup1,sup2,sup3	amount to raise baseline of superscripts if 1) display style
+				2) nondisplay nonvariant style 3) variant style
+	sub1,sub2	amount to lower baseline of subscripts if superscript
+				is 1) absent 2) present
+	supdrop,subdrop amount below top or bottom of large box to place baseline
+				if the box has a superscript or subscript
+				in this size
+	delim1,delim2	size of \comb delimiters in 1)display 2)nondisplay style
+	axisheight	height of fraction lines above the baseline
+				(this is midway between the two bars of = sign)
+;
+define num1=9,num2=10,num3=11,denom1=12,denom2=13,sup1=14,sup2=15,sup3=16,
+sub1=17,sub2=18,supdrop=19,subdrop=20,delim1=21,delim2=22,axisheight=23;
+define mathpar(x,fsize)=⊂fontpar(mathfonttable(fsize+2),x)⊃;
+
+preload_with sup1,sup2,sup2,sup2,sup3,sup3,sup3,sup3; saf integer array
+	suptable[0:7] # the superscript shift to use, as a function of style;
+
+comment As an example of the previous definition, one can write
+	mathpar(axisheight,scriptsize)
+to get the axisheight parameter for script size type.
+
+A \mathex font has a somewhat different info file since it is used for large
+sizes of symbols. The lg field of font info is used to link together similar
+characters in order of increasing size. (It is a relative address: add the lg field 
+to get to the next larger size.) This linked list is terminated either by 0
+(meaning this is a variable-size character that can be made arbitrarily large)
+or by 31 (meaning this is the largest available size).  The ms field
+of font info also has a different interpretation. On symbols used as \mathops
+(e.g. summation or integral signs), the ms field points to a &quot;kern&quot; which,
+if nonzero, means that limits are normally set to the right and the lower limit
+is shifted left by this kern value. If the kern is 0, it means that limits in
+display style will be centered above and below the operator. (To change between
+centering and attaching at the right, one writes &quot;\limitmodify&quot; after the
+operator.)
+
+Built-up symbols are specified as follows, in a \mathex font:
+The ligature field is zero, and so is the height field. The miscellaneous field
+points to a word of font information having four seven-bit fields, identifying
+the top, middle, bottom, and extension components of the character. (These
+four fields are right-justified in the word.) The height and width fields of the
+font info refer to component dimensions, not to the built-up symbol itself,
+since the built-up symbol will have variable size. If top, middle, or bottom
+portions are zero, the extension component runs all the way through that
+portion of the symbol, otherwise it directly abuts these portions. The
+built-up symbol is formed by including an integral number of extension
+components.  If there is a middle, the same number of extension components
+will appear above and below.  For example, a left brace has all four
+components specified, while a double | (the cardinality or norm symbol)
+has only an extension part. The floor and ceiling brackets are like regular
+brackets, but without top or bottom, respectively. The width of the
+extension component is assumed to be the width of the entire built-up symbol.
+
+A \mathex font also includes six parameters used to govern formula setting:
+	defaultrulethickness, the thickness of \over and \overline bars
+	bigopspacing(1),(2), the minimum glue space above and below a large
+		displayed operator, respectively
+	bigopspacing(3),(4), the minimum distance between a limit's baseline
+		and a large displayed operator, when is limit is above, below
+	bigopspacing(5), the extra glue placed above and below displayed limits;
+
+define defaultrulethickness=⊂mathpar(9,1)⊃;
+define bigopspacing(i)=⊂mathpar(9+i,1)⊃;
+define largestlig=2^lgs-1;
+
+internal procedure readfontinfo(integer chan,f) # reads font information file;
+begin integer n,p;
+n←wordin(chan);
+if fmemptr+n≥fmemsize+128+6 then overflow(fmemsize);
+arryin(chan,fontinfo[f lsh 7],128) # read primary character info;
+p←fmemptr # the secondary tables go into fmem;
+wdbase[f]←p;
+htbase[f]←wdbase[f]+wordin(chan);
+dpbase[f]←htbase[f]+wordin(chan);
+lgbase[f]←dpbase[f]+wordin(chan);
+msbase[f]←lgbase[f]+wordin(chan);
+dwbase[f]←msbase[f]+wordin(chan);
+parbase[f]←dwbase[f]+wordin(chan);
+arryin(chan,fmem[p],n-(128+6));
+fmemptr←fmemptr+n-(128+6);
+end;
+comment Making lists into boxes: nullbox,hpackage,vpackage,hpack,vpack;
+
+simple integer procedure nullbox;
+begin comment returns a pointer to an empty box;
+integer b; b←getnode(boxnodesize); mem[b]←hlistnode lsh typed; return(b);
+end;
+
+internal real str,shr # total stretch,shrink found by packaging routine;
+
+internal integer procedure hpackage(integer head; real desiredwidth; boolean trial);
+begin comment This procedure runs through the hlist pointed to in mem[head]
+and returns a pointer to a box formed from it. The width of the box is
+	desiredwidth, if desiredwidth ≥ 0
+	natural width - desiredwidth, if desiredwidth &lt; 0 (expansion).
+One consequence is that the box has essentially its natural width if
+desiredwidth = -epsilon. The box may actually extend outside its computed
+dimensions if the desired width is less than the natural width minus the
+maximum amount of shrinkage.
+
+The parameter &quot;trial&quot; is set true if the returned result is to be &quot;-1&quot; instead of
+a box pointer whenever desired width is unachievable. 
+
+The global variable mem[inserts] is set to point to a list of all topinserts
+or botinserts or ejects that are affixed to this hlist, and they are removed
+from the hlist. (But nodes are not removed when trial is true.)
+
+The global variables str,shr are set to point to the total stretch and
+shrink of the glue;
+
+integer c,t,f; real r # temporary storage;
+integer p,prevp # current and previous node;
+integer curins # tail of insert list;
+real ht,dp,wd # computed height, depth, width;
+real delta # difference of actual width from desired width;
+
+mem[inserts]←0; curins←inserts # set insert list empty;
+prevp←head; p←mem[head] # beginning of given hlist;
+ht←dp←wd←str←shr←0.0 # computed height and depth will be ≥0;
+
+while p do
+	begin case type(p) of begin
+	[charnode] begin t←fontinfo[c←info(p)];
+	f←c lsh -7; # font number;
+	wd←wd+charwd(f,t);
+	r←charht(f,t); if r&gt;ht then ht←r;
+	r←chardp(f,t); if r&gt;dp then dp←r end;
+	[hlistnode][vlistnode][rulenode][unsetnode] begin wd←wd+width(p);
+	if type(p)≠rulenode then r←shiftamt(p) else r←0.0;
+	if height(p)-r &gt; ht then ht←height(p)-r;
+	if depth(p)+r &gt; dp then dp←depth(p)+r end;
+	[whatsitnode] hpackext(p) # in case of extensions;
+	[kernnode] wd←wd+gluespace(p);
+	[gluenode] begin t←value(p);
+	wd←wd+gluespace(t);
+	str←str+gluestretch(t); shr←shr+glueshrink(t);
+	if trial and wd&gt;desiredwidth+shr then return(-1) end;
+	[leadernode][hyphnode][penaltynode][discnode];
+	[ejectnode][insnode] if not trial then begin mem[curins]←mem[curins]+p;
+	curins←p; p←link(p); setlink(curins,0);
+	setlink(prevp,p); continue end;
+	else confusion
+	  end;
+	prevp←p; p←link(p);
+	end;
+
+comment Now the statistics-gathering and node-shuffling is complete,
+so we wrap it up;
+if trial and wd&gt;desiredwidth+shr then return(-1);
+p←getnode(boxnodesize);
+mem[p]←(hlistnode lsh typed)+(mem[head] lsh valued);
+if desiredwidth=-epsilon then desiredwidth←wd
+else if desiredwidth&lt;0 then desiredwidth←wd-desiredwidth;
+width(p)←desiredwidth; height(p)←ht; depth(p)←dp;
+delta←desiredwidth-wd;
+if delta≥0 and str&gt;0.0 then glueset(p) ← delta/str
+else if delta&lt;0 and shr&gt;0.0 then glueset(p) ← -1.0 max (delta/shr);
+if delta&lt;-shr-.1 and tracing land 1 then 
+		begin print(nextline,&quot;Overfull box,&quot;,cvf(-delta-shr),
+		&quot; points too wide:&quot;); tracedump(p);
+		end;
+if glueset(p)=0 and delta≠0 then glueset(p)←epsilon;
+return(p);
+end;
+
+internal integer procedure vpackage(integer head; real desiredheight; boolean page);
+begin comment This procedure runs through the vlist pointed to in mem[head]
+and returns a pointer to a box formed from it. The height of the box is
+	desiredheight, if desiredheight ≥ 0
+	natural height - desiredheight, if desiredheight &lt; 0 (expansion).
+One consequence is that the box has essentially its natural height if
+desiredheight = -epsilon. The box may actually extend outside its computed
+dimensions if the desired height is less than the natural height minus the
+maximum amount of shrinkage, or if boxes have been shifted left of the
+reference point.
+
+All topinserts are replaced by the corresponding vlist, which is moved to the
+front of the list. Similarly, all botinserts move to the bottom (relative
+order being otherwise preserved). Any mark nodes encountered will change
+the value of &quot;botmark&quot;. The global variables str,shr are set to point to the total 
+stretch and shrink of the glue.
+
+If &quot;page&quot; is true, the depth of the resulting box is constrained to be
+at most pagedepthmax.
+
+Warning: Parameter &quot;head&quot; must not equal &quot;temphead&quot; or &quot;inserts&quot;, the latter lists
+are destroyed by this procedure;
+
+integer t; real r # temporary storage;
+integer curbot # tail of list for botinserts, the head is temphead;
+integer curtop # tail of list for topinserts, the head is inserts;
+integer savep # pointer to return to in main list after an insert;
+integer prevp,p # current node and previous node;
+real ht,dp,wd # the box dimensions so far;
+real delta # difference of actual height from desired height;
+label loop # go through a vlist;
+
+curbot←temphead; mem[temphead]←0 # botinsert list empty;
+curtop←inserts; mem[inserts]←0 # topinsert list empty;
+prevp←head; p←mem[head];
+ht←dp←wd←shr←str←0.0;
+
+loop: savep←0 # no insert is in progress;
+while p do
+	begin
+	case type(p) of begin
+	[charnode] begin integer c,f; t←fontinfo[c←info(p)];
+	f←c lsh -7 # font number;
+	r←charwd(f,t); if r&gt;wd then wd←r;
+	ht←ht+dp+charht(f,t); dp←chardp(f,t) end;
+	[hlistnode][vlistnode][rulenode][unsetnode] begin ht←ht+dp+height(p);
+	dp←depth(p);
+	if type(p)≠rulenode then r←width(p)+shiftamt(p) else r←width(p);
+	if r&gt;wd then wd←r end;
+	[whatsitnode] vpackext(p) # in case of extensions;
+	[gluenode] begin t←value(p);
+	ht←ht+dp+gluespace(t); dp←0;
+	str←str+gluestretch(t); shr←shr+glueshrink(t) end;
+	[leadernode][penaltynode][ejectnode];
+	[marknode] begin if botmark then delrclink(botmark); botmark←value(p);
+	mem[botmark]←mem[botmark]+refct1 end;
+	[insnode] begin t←value(p);
+	if savep then confusion # there are no inserts in inserts;
+	setlink(prevp,link(p)); freeavail(p) # we're done with this node;
+	if mem[t] land (1 lsh typed) then
+		begin comment topinsert;
+		savep←prevp; prevp←curtop;
+		end
+	else	begin comment botinsert;
+		savep←-prevp; prevp←curbot;
+		end;
+	mem[prevp]←mem[prevp]+(p←value(t));
+	freenode(t,gluespecsize) # and we're done with this one too;
+	continue end;
+	else confusion
+	  end;
+	prevp←p; p←link(p);
+	end;
+if savep then
+	begin comment Finished with an insert list, must resume the original one;
+	if savep&gt;0 then curtop←prevp else curbot←prevp;
+	prevp←abs(savep); p←link(prevp); go to loop;
+	end;
+comment Now link in the inserts;
+mem[prevp]←mem[prevp]+mem[temphead] # this puts in the botinserts;
+if mem[inserts] then
+	begin mem[curtop]←mem[curtop]+mem[head];
+	mem[head]←mem[inserts];
+	end;
+	
+comment Now the statistics-gathering and node-shuffling pass is complete,
+so we wrap it up;
+if page and dp&gt;pagedepthmax then
+	begin ht←ht+dp-pagedepthmax; dp←pagedepthmax;
+	end;
+p←getnode(boxnodesize);
+mem[p]←(vlistnode lsh typed)+(mem[head] lsh valued);
+if desiredheight=-epsilon then desiredheight←ht
+else if desiredheight&lt;0 then desiredheight←ht-desiredheight;
+height(p)←desiredheight; width(p)←wd; depth(p)←dp;
+delta←desiredheight-ht;
+if delta≥0 and str&gt;0.0 then glueset(p) ← delta/str
+else if delta&lt;0 and shr&gt;0.0 then glueset(p) ← -1.0 max (delta/shr);
+if delta&lt;-shr-.1 and tracing land 1 then 
+	begin print(nextline,&quot;Overfull box,&quot;,cvf(-delta-shr),&quot; points too high:&quot;);
+	tracedump(p);
+	end;
+if glueset(p)=0 and delta≠0 then glueset(p)←epsilon;
+return(p);
+end;
+
+integer procedure hpack(integer p; real dw) # like hpackage but p is ptr not head;
+begin mem[holdhead]←p; hpackage(holdhead,dw,false);
+dsnodelist(mem[inserts]) # inserts are forgotten;
+end;
+
+integer procedure vpack(integer p; real dh) # like vpackage but p is ptr not head;
+begin mem[holdhead]←p; vpackage(holdhead,dh,false);
+end;
+comment Spacing and adding to the current list: initsftable,append,finishdisplay;
+
+comment The entries of sftable are used to decide how much stretchability
+appears in spaces between words: The stretch component of glue is multiplied
+by the &quot;spacefactor&quot; and the shrink component is divided by this factor,
+determined as the last nonzero entry in the sequence
+	1.0 sftable[a] sftable[b] ... sftable[z]
+if ab...z appears between consecutive spaces. The sf value of a box is 1.0,
+the other sf values are set by the following procedure;
+
+internal saf real array sftable[0:127] # spacefactor table;
+
+internal procedure initsftable(real period,query,excl,colon,semi,comma);
+begin arrclr(sftable,1.0);
+sftable[&quot;)&quot;]←sftable[&quot;'&quot;]←sftable[&quot;&quot;&quot;&quot;]←sftable[&quot;]&quot;]←0.0;
+sftable[&quot;.&quot;]←period;
+sftable[&quot;?&quot;]←query;
+sftable[&quot;!&quot;]←excl;
+sftable[&quot;:&quot;]←colon;
+sftable[&quot;;&quot;]←semi;
+sftable[&quot;,&quot;]←comma;
+end;
+
+simple integer procedure interlineglue(real delta; integer p);
+begin comment returns a pointer to glue specification that makes up for
+baseline distance deficiency of delta, when p points to the \baselineskip glue;
+integer q;
+if delta≥0 then
+	begin comment The normal baseline spacing was not exceeded;
+	q←getnode(gluespecsize);
+	gluespace(q)←delta;
+	gluestretch(q)←gluestretch(p);
+	glueshrink(q)←glueshrink(p);
+	end
+else	begin q←eqlink(lineskip) # use lineskip glue if baseline
+		distance is already large;
+	mem[q]←mem[q]+refct1 # augment reference count;
+	end;
+return(q);
+end;
+
+simple procedure append(integer b) # append a box node to the current list;
+begin comment When appending boxes to an hlist, we simply adjust the links
+and the spacefactor, but when appending to a vlist the inter-line glue
+is also appended;
+if abs(mode)=vmode and prevdepth xor pflag then
+	begin comment appending to a vlist with previous depth prevdepth;
+	integer p,q;
+	p←eqlink(baselineskip) # pointer to current baselineskip glue;
+	q←interlineglue(gluespace(p)-prevdepth-height(b),p);
+	getavail(p); mem[curnode]←mem[curnode]+p;
+	mem[p] ← (gluenode lsh typed) + (q lsh valued) + b;
+	end
+else mem[curnode] ← mem[curnode] + b # in simple case, just append box b;
+curnode ← b;
+if abs(mode) = hmode then spacefactor←1.0 else prevdepth←depth(b);
+end;
+
+procedure finishdisplay(integer p);
+begin comment This procedure takes the hlist p and appends it to the current
+page as a displayed equation. The global variables eqnobox and abovedisplaywidth and
+(hangbegin,hangwidth,hangfirst) are also used to construct an appropriate display.
+We must be in vmode;
+integer b # box containing the equation;
+real w # width of the equation;
+real dw # desired line width;
+real nw # width of equation number to append to the equation;
+real lmar # width of left indent;
+real shift # amount to shift equation right for centering;
+real qd # quad width for principal mathsy font;
+integer q1,q2 # pointers to glue spec for above and below;
+
+if p=0 then return # ignore empty display (probably was $$\halign{...}$$);
+b←hpack(p,-epsilon); w←width(b) # determine the equation's natural width;
+dw←pagemem[hsizemem] # normal line width;
+lmar←0.0;
+if (hangbegin≤1 and not hangfirst) or (hangbegin&gt;1 and hangfirst) then
+	begin comment adjust for indentation;
+	if hangwidth≥0 then lmar←hangwidth;
+	dw←dw-abs(hangwidth);
+	end;
+if eqnobox then nw←width(eqnobox) else nw←0.0;
+qd←mathpar(quad,textsize);
+if w+qd+nw&gt;dw then
+	begin comment The equation doesn't fit with its natural width,
+		we will squeeze it as best we can;
+	if (w-shr)+qd+nw≤dw then
+		begin comment It will fit on one line;
+		freenode(b,boxnodesize) # forget b and try again;
+		b←hpack(p,dw-nw-qd); w←width(b);
+		end
+	else	begin comment Too big, drop equation number to separate line;
+		nw←0.0;
+		if w&gt;dw then
+			begin freenode(b,boxnodesize) # forget b and try again;
+			b←hpack(p,dw); w←width(b);
+			end;
+		end;
+	end;
+comment Now we have an equation b of width w and a possible equation number
+eqnobox of width nw, and they are to be centered appropriately on a line of
+width dw. (If eqnobox≠0 and nw=0, the equation number will appear on a separate
+line below the display.);
+shift←(dw-w)/2.0 # prepare to center the equation on the line;
+if nw&gt;0 and shift&lt;2.0*nw then shift←0.0 # but put it flush left if centering
+	would make it too close to the equation number;
+comment At this point shift will be negative if the equation is too large--
+	it will extend into the margins;
+if shift+lmar≤abovedisplaywidth then
+	begin comment For large formulas, use dispskip glue above and below;
+	q1←eqlink(dispskip); q2←q1;
+	end
+else	begin comment otherwise use dispaskip,dispbskip and delete a virtual line;
+	hangbegin←hangbegin+1;q1←eqlink(dispaskip);q2←eqlink(dispbskip);
+	end;
+store((gluenode lsh typed)+(q1 lsh valued));
+mem[q1]←mem[q1]+refct1 # adjust the reference count;
+if nw then
+	begin comment attach equation number; integer q;
+	getavail(q); mem[q]←fillgluespec+eqnobox;
+	mem[b]←mem[b]+q; b←hpack(b,dw-shift) # eqno will be right-justified;
+	end;
+shiftamt(b)←shift+lmar;
+append(b) # append the displayed formula to the page;
+if eqnobox and nw=0 then
+	begin comment It's necessary to append the equation number on separate line;
+	shiftamt(eqnobox)←lmar+dw-width(eqnobox);
+	store((penaltynode lsh typed)+(infpen lsh valued)) #
+		&quot;infinite&quot; penalty means that no break will occur here;
+	append(eqnobox);
+	end
+else	begin comment Otherwise we put the chosen glue after the equation;
+	store((gluenode lsh typed)+(q2 lsh valued));
+	mem[q2]←mem[q2]+refct1 # adjust the reference count;
+	end;
+hangbegin←hangbegin-3 # treat as three lines output w.r.t. hanging indents;
+end;
+comment Hyphenation (word division) routines.
+
+The following procedure is pretty much independent of the rest of TEX and
+can be omitted on first reading;
+
+internaldef excepsize=373,sufsize=109,prefsize=109,btabsize=30 
+	# hyphenation table sizes;
+internal saf integer array exceptable[0:excepsize-1] 
+	# ordered hash table for exceptional words;
+internal saf integer array excephyph[1:excepsize-1] 
+	# corresponding hyphenation patterns;
+internal saf integer array suffix[0:sufsize-1] # interpretive commands for suffixes;
+internal saf integer array prefix[0:prefsize-1] # interpretive cmnds for prefixes;
+internal saf integer array btable[2:btabsize+1] # consonant-pair exception table;
+
+procedure hyphenate(integer p,n,dhyphen) # insert discretionary hyphens;
+begin comment This procedure puts discretionary hyphen node of the specified
+kind into the linked list of n ≥ 5 letters starting in mem[p]. (Kern nodes
+might be between letters of this list.) The auxiliary tables for hyphenation
+are built in TEXPRE.
+This routine was developed jointly by D. E. Knuth and F. M. Liang;
+integer u,q,r,b,c,h,i,j,t,pc;
+integer finale # two before loc of final&quot;e&quot; when suffix routine starts;
+boolean firsttime;
+label hashloop,phase2,sufbegin,interps,falsexx,marksuf,restarts,phase3,checkc,
+restartp,interpp,marki,phase4c,vowelscan,phase4v,phase4vc,ertest,phase5,hashsearch;
+comment People who don't like go to statements should not read this;
+
+define o(c)=⊂&quot;c&quot; land '37⊃ # five-bit version of ascii character c;
+
+u←getnode(n+2) # Get consecutive locations for convenient working back and forth;
+q←p # prepare to store the given letters in the sequential list;
+for i←u+1 thru u+n do
+	begin mem[i]←info(q) land '37 # store five bits of character;
+	q←link(q); if type(q)=kernnode then q←link(q);
+	end;
+finale←1000000 # infinity;
+
+comment The main part of this procedure (from now up to Phase 5) works entirely
+in the sequential list just formed. Assuming that
+	mem[u]=0, mem[u+1]=a[i] for 1≤i≤n, mem[u+n+1]=0,
+this procedure hyphenates the word a[1]...a[n] by setting mem[u+i]←0 when
+a hyphen comes just before a[i], using TEX's hyphenation algorithm;
+
+comment Phase 1. Search exception dictionary (an ordered hash table);
+j← 7 min n;
+hashsearch: t←mem[u+1];
+for i←u+2 thru u+j do t←(t lsh 5)+mem[i];
+h←t mod excepsize;
+hashloop: while exceptable[h]&gt;t do h←h-1;
+if exceptable[h]≠t then
+	begin if h then
+		begin if j≠n or mem[u+n]≠o(s) then go to phase2;
+		j←j-1; go to hashsearch;
+		end;
+	h←excepsize-1; go to hashloop;
+	end;
+
+comment Now the first 7 letters have been found in exceptable[h].
+The corresponding hyphenation pattern appears in excephyph[h], but it
+may be necessary to check more than seven letters to make sure the exception
+applies. Additional letters to check appear at the righthand side of
+excephyph[h], in a straightforward manner exhibited by the following code;
+
+t←excephyph[h];
+while t land '37 do
+	begin comment must check another letter;
+	j←j+1;
+	if mem[u+j]≠t land '37 then go to phase2;
+	t←t lsh -5;
+	end;
+
+t←excephyph[h] land(flag ash(2-n)) # leftmost n-1 bits;
+i←u+3;
+while t do
+	begin if t&lt;0 then mem[i]←0;
+	t←t lsh 1; i←i+1;
+	end;
+go to phase5;
+
+comment Phase 2. Interpretive routine for suffix removal. 
+The array suffix contains a &quot;program&quot; for a machine with the following
+architecture. Instruction words have four fields, namely opcode, truex,
+falsex, operand, each 9 bits. There are two registers: the program counter pc and
+the character position i. There is also a toggle called firsttime.
+Initially i=u+n-1, pc=mem[u+n], firsttime=true.
+(Thus we begin by branching on the final character, mem[u+n].) The opcodes
+are as follows, using t to stand for the operand field of the instruction:
+
+	scan. If mem[i]=t, decrease i by 1 and go to truex, else go to falsex.
+	double. Analogous, but tests if mem[i]=mem[i-1].
+	table. Analogous, but tests if mem[i]εsuffix[t], where xεy means that
+		word y shifted left x bits has a leading 1 bit.
+	check. Analogous, but tests if i&gt;u+3 and does not decrease i.
+	success. Sets mem[i+t+1]←0, stops.
+	fail. Stops.
+	repeat. Sets mem[i+t+1]←0, firsttime←false, i←i+t-1, pc←mem[i+1]. Thus,
+		the suffix routine is re-entered before the present suffix.*
+	again. If firsttime, sets firsttime←false, i←u+n-2, pc←mem[i+1]. Thus,
+		the suffix routine is re-entered with the final character omitted.*
+		Otherwise goes to truex.
+	mark. If t&gt;0 or firsttime, sets mem[i+t+1]←0. Then goes to truex.
+	efail. (Special routine used to omit &quot;ed&quot;.) If mem[u+n]=&quot;d&quot; and
+	mem[u+n-1]=&quot;e&quot;, sets mem[u+n-1]←0, i←u+n-3, pc←mem[u+n-2]. Otherwise stops.
+
+* Actually the suffix routine is reentered only when i≥u+3;
+
+define opcodes=9,opcoded=27,truexs=9,truexd=18,falsexs=9,falsexd=9,oprands=9,
+	oprandd=0 # fields in interpreted instructions;
+comment the above uses the fact that bitsperwd=36, much smaller fields would work;
+
+define scan=0,double=1,table=2,check=3,success=4,fail=5,repeat=6,again=7,
+	mark=8,efail=9 # numeric equivalents of symbolic opcodes;
+
+phase2: i←u+n-1; firsttime←true;
+sufbegin: pc←mem[i+1]; if pc=o(e) then finale←i+1 else finale←1000000;
+interps: case field(opcode,t←suffix[pc]) of begin
+[scan] if(mem[i] xor t) land '37 then go to falsexx else i←i-1;
+[double]if mem[i]≠mem[i-1] then go to falsexx else i←i-1;
+[table] if(suffix[field(oprand,t)]lsh mem[i])≥0 then go to falsexx else i←i-1;
+[check] if i≤u+3 then go to falsexx;
+[success] begin mem[i+field(oprand,t)+1]←0; go to phase3 end;
+[fail] go to phase3;
+[repeat] begin i←i+field(oprand,t)-1; go to marksuf end;
+[again] if firsttime then begin i←u+n-2; go to restarts end;
+[mark] if (j←field(oprand,t)) or firsttime then mem[i+j+1]←0;
+[efail] if mem[u+n]=o(d) and mem[u+n-1]=o(e) then begin i←u+n-3; go to marksuf end
+else go to phase3;
+else confusion
+  end;
+pc←field(truex,t); go to interps;
+falsexx: pc←field(falsex,t); go to interps;
+marksuf: mem[i+2]←0;
+restarts: firsttime←false; if i≥u+3 then go to sufbegin;
+
+comment Phase 3. Interpretive routine for prefix removal. 
+The array prefix contains a &quot;program&quot; for a machine with the following
+architecture. Instruction words have four fields, namely opcode, truex,
+falsex, operand, each 9 bits. There are two registers: the program counter pc and
+the character position i. Initially i=u+2 and pc=mem[u+1].
+(Thus we begin by branching on the first character, mem[u+1].) The opcodes
+are as follows, using t to stand for the operand field of the instruction:
+
+	scan. If mem[i]=t, increase i by 1 and go to truex, else go to falsex.
+	repeat. Set i←i-t. If mem[i+1]=0, stop, otherwise set pc←mem[i],
+		mem[i]←0, i←i+1.
+	mark. If t&gt;0 then set mem[i-t]←0. Also remember the value of mem[i],
+		for phase 4, then set mem[i]←0 (unless mem[i+1]=0) and stop.
+	table. If mem[i]ε(bit-pattern specified in truex,falsex,oprand fields)
+		then do a mark 0, otherwise just stop.
+	fail. Stop.
+	vow,cons. Stop.
+
+Actually there are four flavors of stopping: One (vow) goes to phase 4 assuming
+that mem[i-1] is a vowel, another (cons) goes to phase 4 with mem[i-1] ignored,
+the third (fail) omits phase 4 entirely, the last (table when unsuccessful)
+goes to phase 4 restarting at the beginning of the word;
+
+define vow=success, cons=again # numeric versions of new opcodes;
+
+phase3: pc←mem[u+1]; i←u+2;
+restartp: c←pc; j←i-1;
+interpp: case field(opcode,t←prefix[pc]) of begin
+[scan]if(mem[i] xor t)land '37 then begin pc←field(falsex,t); go to interpp end
+else begin i←i+1; pc←field(truex,t); go to interpp end;
+[repeat] begin i←i-field(oprand,t)+1; if mem[i]=0 then go to phase5;
+pc←mem[i-1]; mem[i-1]←0; go to restartp end;
+[mark] begin if t←field(oprand,t) then mem[i-t]←0; go to marki end;
+[table] if t lsh(mem[i]+opcodes)&lt;0 then go to marki
+else begin i←j; go to vowelscan end;
+[fail] go to phase5;
+[vow] go to phase4v;
+[cons] go to phase4c;
+else confusion
+  end;
+
+comment Phase 4. This phase implements the consonant-pairs rule for middle
+of words, as explained in the TEX writeup. Basically there are a few
+special rules for double consonants and combining ch, gh, ph, sh, th into
+single consonants, and then there are exceptional pairs of constants between
+which we will not break. There are two classes of exceptions, strong (like bl)
+and weak (like ft). The necessary information is packed in btable, whose
+words consist of three fields:
+
+	hchar	specifies code for this character followed by letter h
+	weak	specifies address of &quot;weak&quot; exception table for this character
+	leading 26 bits, give &quot;strong&quot;∨&quot;weak&quot; exception table
+
+In order to keep hchar and weak to 3-bit fields, their values are encoded in
+a straightforward manner that can be deduced by reading the following code;
+
+define hchars=3,hchard=0,weaks=3,weakd=hchars # definition of btable fields;
+
+marki: comment Now mark a permissible hyphen in mem[i] and do phase4 scanning;
+if mem[i+1]=0 then go to phase5 # we don't allow only one letter between pref,suf;
+c←mem[i]; mem[i]←0; go to vowelscan;
+phase4c: c←mem[i];
+vowelscan: comment We're looking for a vowel. Now c contains the letter
+originally in mem[i], and suffix[0] is a table of vowels (including the null
+code 0 as a vowel);
+i←i+1; if(suffix[0] lsh c)≥0 then go to phase4c;
+checkc: comment Now c is 0 if we've gone too far, else we've found a vowel;
+if c=0 then go to phase5;
+phase4v: b←mem[i]; i←i+1; if(suffix[0]lsh b)&lt;0 then begin c←b;go to checkc;end;
+
+comment Now b=mem[i-1] is a consonant following a vowel;
+phase4vc: c←mem[i];
+if b=o(q) and c=o(u) then begin i←i-1; go to marki end;
+if(suffix[0] lsh c)&lt;0 then begin i←i+1; go to checkc end;
+if b=c then
+	begin comment double consonant;
+	if c≠o(l) and c≠o(s) then go to marki else go to ertest;
+	end
+else if c=o(h) and j←field(hchar,btable[b]) then
+	begin comment change ch→e,gh→i,ph→o,sh→u,th→y;
+	b←b+j-2; i←i+1; go to phase4vc;
+	end
+else if c=o(k) and b=o(c) then begin i←i+1; go to marki end;
+if mem[i+1]=o(h) and j←field(hchar,btable[c]) then
+	begin comment change ch→e, etc., in second consonant position;
+	c←c+j-2; j←i+2;
+	end
+else j←i+1 # Now j points to where we want a vowel;
+if mem[j]=0 then go to phase5;
+if(suffix[0] lsh mem[j])&lt;0 then
+	begin comment vowel-consonant-consonant-vowel found;
+	if(btable[b] lsh (c-1))≥0 then go to marki # not an exception;
+	if(btable[field(weak,btable[b])+26] lsh(c-1))≥0 then
+		begin comment a strong exception;
+		i←j+1; go to phase4v;
+		end;
+	comment a weak exception;
+	if mem[i+1]=o(a) and mem[i+2]=o(g) and mem[i+3]=o(e) and mem[i+4]=0
+		then go to phase5 else go to ertest;
+	end;
+comment three consonants in a row found;
+i←j+1; go to phase4c;
+ertest: if mem[i+1]=o(e) and mem[i+2]=o(r) and mem[i+3]=0
+	then go to phase5 else go to marki;
+
+comment Phase 5. We're almost done! Although previous phases may have set mem[u+2]
+or mem[u+n-1] or mem[u+n] to zero, we simply ignore this fact as we
+output the answer;
+
+phase5: q←link(p);
+for i←u+3 thru u+n-2 do
+	begin if type(q)=kernnode then q←link(q);
+	comment if i=u+k, the variable q now points to a[k-1];
+	if mem[i] or (i+2≥finale and i≤finale) then q←link(q) else
+		begin getavail(r); t←link(q); mem[r]←dhyphen+t;
+		setlink(q,r); q←t;
+		end;
+	end;
+freenode(u,n+2);
+end;
+comment The paragraph builder: hangwidth,hangbegin,justification,finishparagraph;
+
+comment When a paragraph is initiated, the semantics routine begins to form
+an hlist in hmode. Indentation at the beginning of the paragraph, if any,
+is inserted explicitly into the list, as a box that has width but no
+height or depth or associated list. Hanging indentation is controlled
+by three global variables, &quot;hanglength&quot; and &quot;hangbegin&quot; and &quot;hangfirst&quot;;
+
+internal real hangwidth # amount to indent lines (negative if at right margin);
+internal integer hangbegin # number of lines to wait before indentation changes;
+internal boolean hangfirst # does hanging indent occur before hangbegin or not;
+integer lines # number of lines output by justification procedure;
+real lastwidth # width of final line output by justification procedure;
+real justpar # same as jpar but type real;
+
+comment The major computation associated with paragraph building is the
+breaking of lines done by procedure &quot;justification&quot;, which has the following
+parameters:
+	real initwidth		line width
+	integer linechange	specifies k after which hanging indentation changes
+	real hangwidth		if hangfirst, indentation on lines numbered ≤k
+				otherwise,   indentation on lines numbered &gt;k
+(Note that if hangwidth is 0, the values of hangfirst and linechange don't matter.)
+
+Procedure &quot;justification&quot; takes the hlist headed by temphead and appends it to
+the current list. This procedure also computes the following two quantities:
+	integer lines		the number of lines output
+	real lastwidth		the width of the final line, including possible
+					hanging left indentation
+(The displayed formula routine uses &quot;lastwidth&quot; to decide whether or not to
+omit a line of blank space.)
+
+The justification routine reads through the entire paragraph before deciding
+the best places to break, since it is often better to make a slightly bad
+break at the beginning of a paragraph to make things better later on. In
+general, the algorithm essentially minimizes the sum of the squares of the
+individual badness ratings (plus 1000 if there's a hyphenation on the penultimate
+line) subject to the condition that no line has badness exceeding 200.* To
+do this it maintains a list of &quot;break nodes&quot; containing the following fields:
+	integer lineno		number of lines so far, up to this break
+	real width,gluestretch,glueshrink	accumulated totals so far
+	integer curbrk		points to place in hlist after which break occurs
+	real totbad		accumulated sum of badness squares (times .0001)
+	integer prevbrk		points to breaknode for best preceding break
+	real target		width at which the next line would break ideally
+Furthermore the first word of each break record points to the previous break
+record, sorted in order of the target fields. The value in totbad is the
+minimum possible given a break at the stated position, and the link in prevbrk
+tells how to achieve this minimum. Two pointers are maintained to the breaknode
+list, namely topopen and botopen. The most recent node (the one with highest
+target value) is pointed to by topopen, and by following the links from this
+node to the one pointed to by botopen (inclusive) we obtain all breaks whose
+targets are in the range that leads to finite badness. In typical circumstances,
+there will be comparatively few break nodes between topopen and botopen, so
+comparatively little computation will be needed to rate the desirability of
+a permissible break. Permissible breaks occur at glue nodes immediately following
+anything but a rule, glue, penalty, eject, or &quot;whatsit&quot; node, provided that
+such breaks have not been suppressed by hyphenation control nodes, and we can
+also break at discretionary hyphens, penalty nodes, or eject nodes. In fact,
+an eject node is forced to be a break, no matter how bad the result.
+
+Here's a sort of example of breaking:
+	abc defgh ijk lmnop qrst uvwx
+	yzab cdefghi jklmn opqr stu
+Suppose the line width is such that all breaks up to qrst have badness exceeding
+200, but to break after qrst or uvwx is feasible. Then two break nodes will
+be created, one pointing to the glue following qrst and one pointing to the
+glue following uvwx. (The pointer in curbrk is to a glue node when breaking
+&quot;before&quot; the glue, but to a discretionary hyphen or penalty or eject node
+otherwise. Suppose we have the sequence
+	a, b, \-, &lt;glue&gt;, c,
+then to point at the discretionary hyphen (/-) means to break and to
+include a hyphen there, but to point at the glue node after the \-
+means to break after ab with no hyphen.) In the break node for qrst, the total
+width,gluestretch, and glueshrink are computed up to the beginning of the
+following line, not simply up to the point of break. Thus, if several consecutive
+glue nodes will be eliminated by this break, their space and variability are
+included in the totals, since these totals are used to compute the badness
+of the following line (by subtracting the totals up to another attempted break).
+Both break nodes for qrst and uvwx will have prevbrk pointing back to the
+initial break node (which stands at the very beginning of the paragraph), and
+topopen will point to the uvwx one. botopen will move from the initial break
+node to the qrst node when the next break yzab is tried, since there will be
+no further chances to use it as the prevbrk. The target value of qrst might
+make it feasible to break after jklmn, so it appears that the number of open
+breaks will grow as there as more and more lines. However, long words will
+tend to cut down the number of possibilities. A word is passed to the
+hyphenation procedure for insertion of discretionary hyphens only if it
+has five or more letters and straddles the target of some open break node.
+
+This routine was developed jointly by D. E. Knuth and M . F. Plass.
+
+*Actually &quot;200&quot; in this discussion is short for 100*jpar, where jpar is
+normally 2 but can be changed by the \chpar command;
+
+internaldef prevbrk(p)=⊂mem[p+4]⊃ # break node for best previous break leading here;
+internaldef lineno(p)=⊂mem[p+5]⊃ # number of lines up to this break;
+internaldef curbrk(p)=⊂mem[p+6]⊃ # hlist position of this break;
+internaldef target(p)=⊂memreal(p+7)⊃ # best curwd for the next break after here;
+internaldef totbad(p)=⊂memreal(p+8)⊃ # best sum of badness^2 up to here;
+internaldef breaknodesize=9 # number of words in a break node;
+
+comment The following global variables are not currently used by other routines
+in TEX, but they are declared global anyway in case some extension wants to
+refer to them;
+
+internal boolean autobreaking # automatic line breaking not shut off by hyphnode;
+internal real curwd,curst,cursh # current total width, stretch, and shrink;
+internal integer topopen,botopen # boundary of the active break nodes;
+
+internal procedure justification(real initwidth; integer linechange;
+	real hangwidth) # routine to break hlists almost optimally;
+begin real secondwidth # initwidth - |hangwidth|;
+integer q,p,prevp,n,t,ll,r;
+integer bestplace; real bestscore,correction;
+boolean notwarned # warning message has not been issued;
+
+simple procedure trybreak(real penalt,w) # decides if p might be a
+	reasonable place to break, and updates the break node table;
+begin comment This procedure is called when p points to a permissible break
+in an hlist, corresponding to an additional penalty as specified.
+(The value of penalt is .01 times the value in TEX's writeup,
+since there's really no need to multiply by 100 when computing badness scores.)
+Parameter w is the current width to be used in badness calculations--it
+differs from curwd if an inserted hyphen would appear at the break.
+If this is a potentially useful break, a new break node is created. The
+value of botopen is adjusted to &quot;close&quot; break nodes that are no longer relevant;
+integer r,prevr; real t,glue,badness;
+r←topopen; prevr←0; bestplace←0; bestscore←10.0^30;
+while true do
+	begin comment Look at all open break nodes to see if there are any which
+	lead to a badness≤200 at the current position, and close break nodes
+	using the fact that target(mem[r])≤target(r);
+	label nogood;
+	t←target(r);
+	if w&gt;t then
+		begin glue←cursh-glueshrink(r);
+		if glue≤0.0001 then glue←.0001;
+		if w&gt;t+glue then
+			if prevr then
+				begin botopen←prevr; done;
+				end
+			else	begin comment A bad break was inevitable;
+				bestplace←botopen←r;
+				bestscore←0.0 # any value is ok here;
+				done;
+				end
+		else badness←((w-t)/glue)^3;
+		end
+	else	begin glue←curst-gluestretch(r);
+		if gluestretch(r)&gt;1000000.0 and notwarned then
+			begin comment floating-point can't handle this;
+			error(&quot;Too much stretch for proper line breaking&quot;);
+			notwarned←false;
+			end;
+		if glue≤0.0001 then glue←.0001;
+		badness←((t-w)/glue)^3;
+		end;
+	if badness&gt;justpar then
+		begin if penalt&gt;-10.0^30 then go to nogood;
+		if badness&gt;10.0^19 then badness←10.0^19 # prevent overflow;
+		end;
+	if penalt≥0.0 then badness←(badness+penalt+.01)^2+totbad(r)
+	else if penalt&gt;-10.0^30 then badness←(badness+.01)^2-penalt^2+totbad(r)
+	else	begin comment this case is for &quot;eject&quot;;
+		badness←(badness+.01)^2+totbad(r);
+		if bestplace=0 and badness&gt;bestscore then badness←bestscore;
+		end;
+	if type(curbrk(r))=discnode and type(p)=discnode then
+		badness←badness+penpen/10000 # additional penalty for two
+			hyphens in a row;
+	if badness≤bestscore then
+		begin bestplace←r; bestscore←badness;
+		end;
+	nogood: if r=botopen then done;
+	prevr←r; r←mem[r];
+	end;
+if bestplace then
+	begin comment A new break was found and bestplace is the best lead-in;
+	integer q,t; q←getnode(breaknodesize);
+	lineno(q)←lineno(bestplace)+1;
+	prevbrk(q)←bestplace;
+	totbad(q)←bestscore;
+	curbrk(q)←r←p;
+	width(q)←curwd;glueshrink(q)←cursh;gluestretch(q)←curst;
+	while r do
+		begin case type(r) of begin
+		[gluenode] begin t←value(r);
+		width(q)←width(q)+gluespace(t);
+		gluestretch(q)←gluestretch(q)+gluestretch(t);
+		glueshrink(q)←glueshrink(q)+glueshrink(t); end;
+		[leadernode][hyphnode][penaltynode][discnode];
+		[kernnode] width(q)←width(q)+gluespace(r);
+		[ejectnode] if r≠p then done;
+		else done
+		  end;
+		r←link(r);
+		end;
+	if lineno(q)&lt;linechange then target(q)←width(q)+initwidth
+		else target(q)←width(q)+secondwidth;
+	if target(q)≥target(topopen) then
+		begin mem[q]←topopen; topopen←q;
+		end
+	else	begin comment This case can arise only in weird circumstances
+		due to changing line lengths, and the code may in fact never
+		be executed. But anyway here it is, in case the algorithm
+		gets extended to situations making this more likely;
+		p←topopen;
+		while p≠botopen and target(mem[p])&gt;target(q) do p←mem[p];
+		mem[q]←mem[p]; mem[p]←q;
+		if p=botopen then botopen←q;
+		end;
+	end;
+end;
+
+comment The justification procedure begins here;
+lines←0; lastwidth←1000.0; notwarned←true;
+p←mem[temphead]; if p=0 then return;
+autobreaking←true;
+secondwidth←initwidth-abs(hangwidth);
+if hangfirst then initwidth↔secondwidth;
+curwd←curst←cursh←0.0;
+prevp←p # prevp doesn't have to point to the node before p, it should only
+	point to a node such that if node p is a glue node the test below
+	for breaking at p is correct;
+topopen←botopen←getnode(breaknodesize);
+curbrk(topopen)←temphead;
+target(topopen)←if linechange&gt;0 then initwidth else secondwidth;
+
+while p do
+	begin comment We go through the hlist calling trybreak at each
+	permissible break;
+	case type(p) of begin
+	[charnode] begin integer c; c←info(p);
+	curwd←curwd+charwd((c lsh -7),fontinfo[c]); end;
+	[hlistnode][vlistnode][rulenode] curwd←curwd+width(p);
+	[whatsitnode] justext(p);
+	[gluenode] begin if autobreaking then
+		begin case type(prevp) of begin
+		[charnode][hlistnode][vlistnode][hyphnode][discnode][insnode]
+		trybreak(0.0,curwd);
+		else
+		  end;
+		end;
+	t←value(p);
+	curwd←curwd+gluespace(t);
+	curst←curst+gluestretch(t);
+	cursh←cursh+glueshrink(t);
+	if autobreaking then
+		begin comment Check to see if possible hyphenation should be
+		tested, namely if the next nodes are lower case letters of the
+		same font, straddling the target of some open break, and
+		followed either by glue or by &quot;.&quot; or &quot;,&quot; of the same font;
+		integer q;
+		if type(q←link(p))=charnode then
+			begin integer t,f,fa,fz,n; real s;
+			label nohyph # go here if hyphenation not to be tried;
+			t←ufield(info,mem[q]);
+			fa←t land('37 lsh(infod+7))+(&quot;a&quot; lsh infod) # &quot;a&quot; in font;
+			fz←fa+(26 lsh infod) # just after &quot;z&quot; in font;
+			n←0 # n will be the number of letters passed;
+			s←curwd # s will be width including lookahead;
+			comment Admissible nodes are kern nodes or lie in the
+				interval [fa,fz) including their link field;
+			while q do
+				begin if mem[q]≥fz then
+					begin if type(q)≠kernnode then done;
+					s←s+gluespace(q) # adjust current width;
+					end
+				else	begin if mem[q]&lt;fa then done;
+					comment lowercase letter found;
+					t←info(q);
+					s←s+charwd((t lsh -7),fontinfo[t]);
+					n←n+1;
+					end;
+				q←link(q);
+				end;
+			if n&lt;5 or q=0 then go to nohyph;
+			case type(q) of begin
+			[charnode] if sftable[(info(q))land '177] = 1.0
+			then go to nohyph;
+			[gluenode];
+			else go to nohyph
+			  end;
+			r←topopen;
+			while s≤target(r) do
+				begin if r=botopen then go to nohyph;
+				r←mem[r];
+				end;
+			if curwd≥target(r) then go to nohyph;
+			hyphenate(p←link(p),n,
+				fa+(((&quot;-&quot;-&quot;a&quot;)lsh infod)+(discnode lsh typed)));
+			continue # resume the &quot;while p&quot; loop;
+			nohyph: curwd←s;
+			end;
+		prevp←link(p); p←q; continue;
+		end;
+	end # end of the [gluenode] case;
+	[leadernode][kernnode][insnode];
+	[hyphnode] autobreaking←ufield(value,mem[p]);
+	[penaltynode] begin short integer n; n←penalty(p);
+	if n&lt;infpen then trybreak(n/100.0,curwd) end;
+	[discnode] begin t←value(p);
+	comment Hyphenation penalty is hpen, and we must consider its width;
+	trybreak(hpen/100,curwd+charwd((t lsh -7),fontinfo[t])) end;
+	[ejectnode] begin trybreak(-10.0^30,curwd) # this opens a new
+	break for sure; botopen←topopen end # and we also close all the others;
+	else confusion
+	  end;
+	prevp←p; p←link(p);
+	end;
+
+comment Now find the best break that's currently open;
+q←topopen; bestscore←10.0^30; bestplace←topopen;
+while true do
+	begin if type(curbrk(q))=discnode then
+		totbad(q)←totbad(q)+penpen/10000 # additional badness
+		for hyphenating the penultimate line;
+	if totbad(q)&lt;bestscore then
+		begin bestplace←q; bestscore←totbad(q);
+		end;
+	if q=botopen then done;
+	q←mem[q];
+	end;
+ll←lineno(bestplace);
+if link(curbrk(bestplace)) then
+	begin comment the last break does not remove the fillglue at end;
+	ll←ll+1; correction←gluestretch(fillglue);
+	end
+else correction←0.0;
+
+comment Now we have found the best sequence of breaks, namely to break into ll
+lines, the last break coming at &quot;bestplace&quot; and the break nodes telling where
+to break after that. The next step is to link up the break nodes in forward
+order, using their (now redundant) lineno fields for this purpose;
+define nextbrk(q)=⊂lineno(q)⊃;
+q←0;
+while bestplace do
+	begin nextbrk(bestplace)←q;
+	q←bestplace; bestplace←prevbrk(q);
+	end;
+
+
+comment During the finishing-up phase, which breaks up the hlist into packages
+that go into the output vlist, q points to the break node specifying the end
+of the current line (or 0 if the current line is the last), and temphead heads
+the hlist of nodes remaining to be output;
+q←nextbrk(q); lines←0;
+while mem[temphead] do
+	begin boolean brokenline # does this line end with an inserted hyphen;
+	brokenline←false;
+	if q then
+		begin comment break the hlist;
+		r←curbrk(q);
+		case type(r) of begin
+		[gluenode] begin delgluelink(value(r));
+		setfield(value,mem[r],zeroglue);end # glue break becomes zero glue;
+		[discnode] begin brokenline←true;
+		mem[r]←mem[r]-((discnode-charnode)lsh typed)# change to charnode;
+		end;
+		else comment ignore all other node types;
+		  end;
+		t←link(r); setlink(r,0);
+		comment Now prune unwanted nodes at the break;
+		while t do
+			begin integer tt; case tt←type(t) of begin
+			[gluenode] delgluelink(value(t));
+			[kernnode][hyphnode][penaltynode][discnode];
+			else done
+			  end;
+			r←link(t);
+			if tt=kernnode then freenode(t,kernnodesize)
+			else freeavail(t);
+			t←r;
+			end;
+		end;
+	r←hpackage(temphead,if (lines←lines+1)&gt;linechange then secondwidth
+		else initwidth,false);
+	if lines=ll then
+		begin lastwidth←width(r);
+		if glueset(r)&gt;0 then
+			lastwidth←lastwidth-glueset(r)*correction;
+		end
+	else if ragged then glueset(r)←glueset(r)*(100.0/(100.0+ragged));
+	if hangwidth&gt;0 and
+	((hangfirst and lines≤linechange)or(not hangfirst and lines&gt;linechange))then
+		 begin shiftamt(r)←hangwidth;
+		if lines=ll then lastwidth←lastwidth+hangwidth;
+		end;
+	append(r);
+	if mode&gt;0 then
+		begin comment If being used by the page builder, insert the
+		topinsert, botinsert, and eject nodes removed from the line
+		by hpackaging, then check if there is any special penalty for
+		breaking after this line;
+		integer pen;
+		if mem[inserts] then
+			begin mem[curnode]←mem[curnode]+mem[inserts];
+			curnode←mem[inserts];
+			while link(curnode) do curnode←link(curnode);
+			end;
+		if (lines=1 and ll&gt;1) or lines=ll-1 then pen←wpen lsh valued
+		else pen←0;
+		if brokenline then pen←pen+(bpen lsh valued);
+		if pen then store((penaltynode lsh typed)+pen);
+		end
+	else dsnodelist(mem[inserts]);
+	if q=0 then done;
+	mem[temphead]←t;
+	q←nextbrk(q);
+	end;
+
+comment Finally, free the list of break nodes;
+while topopen do
+	begin q←mem[topopen];
+	freenode(topopen,breaknodesize);
+	topopen←q;
+	end;
+end;
+
+simple procedure finishparagraph;
+begin comment This procedure is invoked when the paragraph-so-far ends or
+is followed by a displayed equation;
+if type(curnode)=gluenode then
+	begin comment remove space at paragraph end and replace it by hfill;
+	delgluelink(value(curnode)); mem[curnode]←fillgluespec;
+	end
+else store(fillgluespec) # append hfill to paragraph-so-far;
+mem[temphead]←mem[head] # get ready for justification;
+popnest # return to vmode of the page builder;
+justification(pagemem[hsizemem],hangbegin,hangwidth) # append 
+	justified paragraph to the page contribution list;
+end;
+comment Procedures for mmode: finishmlist,boxchar,compact,mathglue,varsymbol,
+	fractionrule,overbar,rebox,cleanbox;
+
+integer procedure finishmlist(integer p);
+begin comment This procedure is called when an mlist has been terminated by
+a } or $ or \right. It completes an incomplete noad, pops the semantic stacks,
+and returns a pointer which can be stored into a noad field if desired. Parameter
+p is the right-delimiter noad if the mlist is terminated by \right, in which
+case the corresponding left-delimiter noad appears at the beginning;
+integer q;
+if incompleatnoad then 
+	begin subscr(incompleatnoad)←mem[head] lor fflag;
+	if p then
+		begin comment We need to move the left-delimiter node out;
+		q←field(link,supscr(incompleatnoad));
+		supscr(incompleatnoad)←link(q) lor fflag;
+		setlink(q,incompleatnoad);
+		mem[head]←q;
+		end
+	else mem[head]←incompleatnoad;
+	curnode←incompleatnoad;
+	end;
+mem[curnode]←mem[curnode]+p # Trick: It isn't necessary to reset curnode if p≠0;
+if head≠curnode then q←mem[head] lor fflag else q←0;
+popnest; return(q);
+end;
+
+integer fount # font used by boxchar procedure;
+
+integer procedure boxchar(integer c, style; boolean corr);
+begin comment This procedure returns a pointer to a box containing the single
+math character c, using the style parameter to govern its choice of fonts.
+If corr is true, the box is made artificially wider by the italic correction
+for c. The global variable fount is set to the number of the font actually used;
+integer b,ch,q,w;
+fount←mathfonttable(fontsize[style]+((c lsh -7) land 3));
+ch←(c land '177)+(fount lsh 7); w←fontinfo[ch];
+getavail(q); mem[q] ← ch lsh valued # q is a charnode;
+b←getnode(boxnodesize); mem[b]←(hlistnode lsh typed)+(q lsh valued);
+width(b)←charwd(fount,w);
+if corr and (c land '600)≠'600 and field(ms,w) then
+	begin comment Put italic correction on box;
+	width(b)←width(b)+fmemreal(msbase[fount]+field(ms,w));
+	glueset(b)←epsilon # mark box nonstandard;
+	end;
+height(b)←charht(fount,w); depth(b)←chardp(fount,w);
+return(b);
+end;
+
+comment The boxchar procedure puts single characters into explicit boxes
+for convenience in the mmode programs. Unfortunately this can consume a lot
+of memory space, especially in a large table of numeric data, when there are
+no italic corrections. Therefore the following straightforward procedures
+are applied after a formula has been built;
+forward recursive integer procedure compactlist(integer p);
+
+recursive integer procedure compactbox(integer p);
+begin comment The box pointed to by p is replaced by a single character box if
+possible, and so are all subboxes with p;
+integer r,c,f,w,t;
+r←value(p); if r=0 then return(p);
+if link(r)≠0 then
+	begin setfield(value,mem[p],compactlist(r)); return(p);
+	end;
+if (t←type(r))=hlistnode or t=vlistnode then
+	begin setfield(value,mem[p],r←compactbox(r)); t←type(r);
+	end;
+if glueset(p)≠0 or t≠charnode or shiftamt(p)≠0 then return(p);
+comment The box contains a single unshifted character with glueset=0;
+freenode(p,boxnodesize); return(r);
+end;
+
+recursive integer procedure compactlist(integer p);
+begin comment All boxes in the hlist or vlist pointed to by p are compactboxed;
+integer q ,r # pointers which run through the list, with q=link(r);
+r←-1; q←p;
+while q do
+	begin integer nextq,s,t; nextq←link(q);
+	if ((t←type(q))=hlistnode or t=vlistnode) and (s←compactbox(q))≠q then
+		begin setlink(s,nextq);
+		if r≥0 then setlink(r,s) else p←s;
+		q←s;
+		end;
+	r←q; q←nextq;
+	end;
+return(p);
+end;
+
+real curquad # the quad width to be used in the mathglue procedure;
+
+integer procedure mathglue(real x,y,z);
+begin comment returns a pointer to a glue node specifying x*curquad, y*curquad,
+z*curquad as its glue parameters;
+integer p,g; getavail(g); p←getnode(gluespecsize);
+mem[g]←(gluenode lsh typed)+(p lsh valued);
+gluespace(p)←x*curquad; gluestretch(p)←y*curquad; glueshrink(p)←z*curquad;
+return(g);
+end;
+
+integer procedure varsymbol(integer delimcode, style; real size);
+begin comment This procedure returns a pointer to a box containing a symbol
+of varying size, the smallest available symbol whose height+depth is greater than
+or equal to the given size. The symbol must also be at least as large as the
+symbols of the current style. If necessary, a large symbol will be constructed
+from individual pieces. The parameter delimcode is an 18-bit delimiter
+specification. If delimcode=0, the box will be empty and its width will be
+2/3 of a thin space;
+integer b,j,c1,c2,f,uf,p,c,d,top,mid,bot,ext,curnode,n; real exth,s,axis;
+label charfound, exit;
+b←getnode(boxnodesize); p←-1 # b will be the final box, p the character if found;
+c1←delimcode lsh -9; c2←delimcode land '777 # smaller and larger variants;
+if c1≠0 then
+	begin comment try to find small variant that is large enough;
+	j ← fontsize[style] + ((c1 lsh -7) land 3);
+	while j≥0 do
+		begin f←mathfonttable(j);p←(c1 land '177)+(f lsh 7);
+		c←fontinfo[p]; if charht(f,c)+chardp(f,c)≥size then go to charfound;
+		j←j-4 # go to next larger size;
+		end;
+	end;
+if c2=0 then go to charfound # p is best we can do although it wasn't big enough;
+comment Now look for larger symbol in \mathex font;
+if c2 land '600 ≠ '600 then
+	begin error(&quot;Large delimiter '&quot;&amp;cvos(c2)&amp;&quot; should be in mathex font&quot;);
+	go to charfound;
+	end;
+f←mathfonttable(3); p←(c2 land '177)+(f lsh 7);
+while true do
+	begin c←fontinfo[p];
+	d←field(lg,c) # &quot;ligature&quot; field of font info, points to next larger size;
+	if d=0 then done # 0 means this character must be fabricated;
+	if d=largestlig then go to charfound # there is no larger size;
+	if charht(f,c)+chardp(f,c)≥size then go to charfound;
+	p←p+d # advance to next larger size;
+	if p≥(f+1)lsh 7 then
+		begin error(&quot;Bad font link for large delimiter '&quot;&amp;cvos(c2));
+		p←-1; go to charfound;
+		end;
+	end;
+
+comment We will construct a variable-size symbol;
+axis←mathpar(axisheight,fontsize[style]);
+d←fmem[msbase[f]+field(ms,c)] # control codes for components of builtup symbol;
+top←(d lsh -21) land '177; mid←(d lsh -14) land '177;
+bot←(d lsh -7) land '177; ext←d land '177;
+uf←f lsh 7; ext←ext+uf;
+s←0.0; exth←chardp(f,fontinfo[ext]) # exth is the allowable height increment;
+
+comment Increase s to the appropriate final size;
+if top≠0 then s←s+chardp(f,fontinfo[top←top+uf]);
+if mid≠0 then s←s+chardp(f,fontinfo[mid←mid+uf]);
+if bot≠0 then s←s+chardp(f,fontinfo[bot←bot+uf]);
+n←0; while s&lt;size do
+	begin n←n+1; s←s+exth;
+	if mid≠0 then s←s+exth # if there is a middle, need 2n extensions;
+	end;
+
+comment Now fabricate the symbol as a vlist;
+curnode←holdhead; mem[holdhead]←0;
+if top≠0 then store(top lsh valued);
+for j←1 thru n do store(ext lsh valued);
+if mid≠0 then
+	begin store(mid lsh valued);
+	for j←1 thru n do store(ext lsh valued);
+	end;
+if bot≠0 then store(bot lsh valued);
+mem[b]←(vlistnode lsh typed)+(mem[holdhead] lsh valued);
+height(b)←s/2+axis; depth(b)←s/2-axis; width(b)←charwd(f,fontinfo[ext]);
+go to exit;
+
+charfound: comment We have found character p in font f with fontinfo c.
+Now we must box it and exit;
+if p&lt;0 then
+	begin mem[b]←hlistnode lsh typed;
+	width(b)←mathpar(quad,fontsize[style])/9.0;
+	glueset(b)←epsilon;
+	end
+else	begin getavail(d); mem[d]←p lsh valued # charnode;
+	height(b)←charht(f,c); width(b)←charwd(f,c); depth(b)←chardp(f,c);
+	mem[b]←(hlistnode lsh typed)+(d lsh valued);
+	end;
+exit: return(b);
+end;
+
+integer procedure fractionrule(real desiredthickness);
+begin comment yields a rulenode of the given thickness;
+integer p; p←getnode(rulenodesize); mem[p]←rulenode lsh typed;
+height(p)←desiredthickness;
+width(p)←-1.0 # width extends to boundary of containing vlist, depth is zero;
+return(p);
+end;
+
+integer procedure overbar(integer p; real desiredheight, desiredthickness, clr);
+begin comment yields a box consisting of box p with a vinculum placed overhead,
+and a blank space (equal to clr) above that. The parameter
+&quot;desiredheight&quot; indicates the top of the vinculum, not the top of the whole box;
+integer b,q,r; q←fractionrule(desiredthickness);
+getavail(r); b←getnode(boxnodesize);
+height(b)←clr; mem[b]←(hlistnode lsh typed)+q;
+mem[q]←mem[q]+r; mem[r]←fillgluespec+p;
+return(vpack(b,desiredheight+clr));
+end;
+
+integer procedure rebox(integer p; real desiredwidth,offset);
+begin comment changes box p into a box of width desiredwidth+offset,
+centering it with lowerfillglue at each end but shifted right by the given offset.
+(The reason for using lowerfillglue is so that (a) fillglue will still be
+effective if centering was not really desired by the user, and (b) lowerfillglue
+will also shrink so that the box can be made narrower than its natural width.
+It is assumed that shiftamt(p)=0;
+integer b,q1,q2,q3; real delta; delta←desiredwidth-width(p);
+getavail(q1); getavail(q2); q3←getnode(boxnodesize); width(q3)←offset;
+mem[q1]←((gluenode lsh typed)+(lowerfillglue lsh valued))+q3;
+mem[q2]←((gluenode lsh typed)+(lowerfillglue lsh valued));
+if type(p)=hlistnode and glueset(p)=0 then
+	begin comment a nice box, unwrap it and add the new glue;
+	integer j; real str,shr;
+	str←2*gluestretch(lowerfillglue); shr←2*glueshrink(lowerfillglue);
+	b←value(p); setfield(value,mem[p],q1);
+	if b then
+		begin mem[q3]←(hlistnode lsh typed)+b;
+		comment We needn't bother to make glueset(q3)≠0;
+		while true do
+			begin comment recompute total stretch and shrink;
+			if type(b)=gluenode then
+				begin integer q; q←value(b);
+				str←str+gluestretch(q);shr←shr+glueshrink(q);
+				end;
+			if link(b)=0 then done;
+			b←link(b);
+			end;
+		mem[b]←mem[b]+q2 # attach the righthand lowerfillglue node;
+		end
+	else mem[q3]←(hlistnode lsh typed)+q2;
+	if delta≥0 then
+		begin if str&gt;0 then glueset(p)←delta/str;
+		end
+	else if shr&gt;0 then glueset(p)←delta/shr
+	else glueset(p)←epsilon;
+	width(p)←desiredwidth+offset; return(p);
+	end;
+comment put box p into a larger box;
+b←getnode(boxnodesize); mem[b]←(hlistnode lsh typed)+(q1 lsh valued);
+height(b)←height(p); depth(b)←depth(p);
+width(b)←desiredwidth+offset;
+glueset(b)←delta/(2.0*gluestretch(lowerfillglue));
+mem[q3]←(hlistnode lsh typed)+p; mem[p]←mem[p]+q2; return(b);
+end;
+
+integer procedure cleanbox(integer p);
+begin comment makes sure that p points to a box with shiftamt(p)=0, given
+that p is either 0 or a pointer to a box;
+if p=0 then return(nullbox);
+if shiftamt(p)=0 then return(p);
+return(hpack(p,-epsilon));
+end;
+comment Major math mode procedures: mlist_to_hlist,evalmlist,boxfield;
+
+preload_with
+	 nospace,  thinspace,opspace,thickspace, nospace,  nospace, nospace,
+	thinspace, thinspace,    0,  thickspace, nospace,  nospace, nospace,
+	 opspace,   opspace,     0,       0,     opspace,      0,       0,
+	thickspace,thickspace,   0,   nospace,  thickspace,nospace, nospace,
+	 nospace,   nospace,     0,   nospace,   nospace,  nospace, nospace,
+	 nospace,  thinspace,opspace,thickspace, nospace,  nospace, nospace,
+	 thspace,   thspace,     0,  thickspace, thspace,  thspace, thspace;
+saf integer array spacetable[0:6,0:6] # table that governs inter-element
+	mlist spacing;
+comment The indices into this table are respectively
+	  box,         op,     bin,     rel,       open,     close,    punct;
+
+integer procedure mlist_to_hlist(integer p, style; boolean penalties);
+begin comment This procedure does most of the mathematics formatting: It converts
+an mlist to an hlist, provided that the noads of the mlist contain no
+references to other mlists. (The procedure &quot;evalmlist&quot; below makes it
+possible to assume that this condition is satisfied.) If &quot;penalties&quot; is true,
+penalty nodes that indicate permissible breaks in the main mlist will be inserted;
+
+integer q # runs through the mlist;
+integer curstyle # the style used at noad q;
+integer cursize # fontsize[curstyle], the type size used at noad q;
+integer r # the previous noad excluding nodenoads and stylenoads;
+integer t # the type of the noad q;
+integer rtype # the type of noad r;
+real maxh # the maximum height so far of this mlist;
+real maxd # the maximum depth so far of this mlist;
+real kern # offset of limits to a displayed operator;
+real drt # the default rule thickness;
+real shiftup,shiftdown # baseline adjustments;
+integer b,c,d # miscellaneous pointers;
+integer curnode # most recent node on hlist being formed;
+
+comment We make two passes over the mlist. On the first pass, boxes are
+constructed for square roots and fractions, etc., and sub/superscripts are
+attached. A few other minor operations are also done (e.g., binnoads are
+changed to boxnoads if they don't appear in the context of binary operators,
+and the height and depth are calculated so that left and right delimiters
+of the appropriate size will be fabricated. The second pass gets rid of
+all noads, and hooks together the desired hlist including appropriate
+glue and penalty nodes;
+
+if p=0 then return(0) # avoid degenerate case;
+
+q←p; r←rtype←-1; maxh←maxd←0.0; drt←defaultrulethickness;
+curstyle←style; cursize←fontsize[curstyle];
+while q do
+	begin comment the first pass; label advanceq,donescripts,attachscript;
+	kern←0.0;
+	case t←type(q) of begin
+
+	[boxnoad] if value(q) and (r←operand(q)) then shiftamt(r)←
+		(height(r)-depth(r))/2-mathpar(axisheight,fontsize[curstyle])
+		# vcentered box is adjusted to the correct vertical position;
+
+	[opennoad];
+
+	[relnoad][closenoad][punctnoad] if rtype=binnoad then
+	mem[r]←mem[r] land ((1 lsh typed)-1) # convert binnoad to boxnoad;
+
+	[binnoad] if rtype=binnoad or rtype=opnoad or rtype=relnoad or
+	rtype=opennoad or rtype=punctnoad or rtype&lt;0 then
+	mem[q]←mem[q] land ((1 lsh typed)-1) # convert binnoad to boxnoad;
+
+	[leftnoad][nodenoad] go to advanceq # leftnoad occurs only at left of mlist;
+
+	[rightnoad] begin if rtype=binnoad then mem[r]←
+	mem[r] land ((1 lsh typed)-1); go to advanceq end;
+
+	[stylenoad] begin integer s,g; curquad←mathpar(quad,cursize);
+	case s←value(q) of begin
+		[0][1][2][3][4][5][6][7] begin curstyle←s; cursize←fontsize[s];
+		go to advanceq end;
+		[thinspace] g←mathglue(1/6,0,0);
+		[thspace] if cursize=0 then g←mathglue(1/6,0,0) else g←0;
+		[thickspace] if cursize=0 then g←mathglue(5/18,5/18,0) else g←0;
+		[quadspace] g←mathglue(1.0,0,0);
+		[userspace] if cursize=0 then g←mathglue(2/9,1/9,2/9)
+		else g←mathglue(1/6,0,0);
+		[negthinspace] g←mathglue(-1/6,0,0);
+		[negthspace] if cursize=0 then g←mathglue(-1/6,0,0) else g←0;
+		[negthickspace] if cursize=0 then g←mathglue(-5/18,-5/18,0)
+		else g←0;
+		[negopspace] if cursize=0 then g←mathglue(-2/9,-1/9,-2/9) else g←0;
+		  else confusion end;
+	comment g is a glue node or 0, change this stylenoad to a nodenoad for g;
+	mem[q]←link(q)+(nodenoad lsh typed)+(g lsh valued);
+	go to advanceq end;
+
+	[sqrtnoad] begin integer b,r; real clr # extra blank space above operand;
+	b←cleanbox(operand(q));
+	if curstyle land 3 = 0 then clr←mathpar(xheight,cursize)/4+drt
+	else clr←1.25*drt;
+	r←varsymbol('560760,curstyle,height(b)+depth(b)+clr+drt);
+	comment Now r points to a box containing a radical sign of sufficient
+	size ('560760 is the delimiter code for radical signs). The upper left
+	corner of the corresponding rule should touch the upper right corner
+	of this box. We still need to raise or lower the box appropriately;
+	shiftamt(r)←(height(r)-depth(r)-height(b)+depth(b)-clr-drt)/2;
+	comment Now top of box minus drt equals height(b)+clr plus half the excess;
+
+	mem[r]←mem[r]+overbar(b,height(r)-shiftamt(r),drt,
+		if penalties then drt else 2*drt);
+	operand(q)←hpack(r,-epsilon); end;
+
+	[overnoad] begin b←cleanbox(operand(q));
+	operand(q)←overbar(b,height(b)+3*drt,drt,if penalties then drt
+	else 2*drt) end;
+
+	[undernoad] begin integer p,r,curnode; curnode←cleanbox(operand(q));
+	p←getnode(boxnodesize); operand(q)←p;
+	mem[p]←(vlistnode lsh typed)+(curnode lsh valued);
+	height(p)←height(curnode); width(p)←width(curnode);
+	depth(p)←depth(curnode)+5*drt;
+	if penalties then depth(p)←depth(p)-drt;
+	glueset(p)←2*drt/gluestretch(fillglue);
+	store(fillgluespec);
+	r←fractionrule(drt);
+	mem[curnode]←mem[curnode]+r end;
+
+	[abovenoad] begin real axis,s,delta,rt;
+	integer pn,pd,num,denom,ld,rd,p;
+	num←cleanbox(supscr(q)); denom←cleanbox(subscr(q)); rt←aboverule(q);
+	axis←mathpar(axisheight,cursize);
+	if curstyle land 3 = dispstyle then pn←pd←0 else
+		begin pd←1;if rt=0 then pn←2 else pn←1;
+		end;
+	shiftup←mathpar(num1+pn,cursize);
+	shiftdown←mathpar(denom1+pd,cursize);
+	comment Now axis is the distance from the base line to the center of the
+	bar line, while shiftup and shiftdown are the standard baseline
+	displacements for numerator and denominator in the current style.
+	These standard displacements will be increased, if necessary, to avoid
+	interference between numerator and denominator;
+	
+	comment Center the numerator and denominator by reboxing the smaller one;
+	if width(denom)&lt;width(num) then
+		denom←rebox(denom,width(num),0)
+	else if width(num)&lt;width(denom) then
+		num←rebox(num,width(denom),0);
+
+	comment Compute actual baseline displacements;
+	if rt=0 then
+		begin comment the case of no fraction line;
+		real clr # minimum clearance desired between num and denom;
+		if curstyle land 3 = dispstyle then clr←7*drt else clr←3*drt;
+		if (delta←(depth(num)+height(denom)+clr)-(shiftup+shiftdown))
+		&gt; 0 then
+			begin shiftup←shiftup+delta/2; shiftdown←shiftdown+delta/2;
+			end;
+		end
+	else	begin comment the case of a fraction line;
+		real clr # minimum clearance desired between num, denom, and rule;
+		real delta1,delta2 # possible additions to shiftup, shiftdown;
+		if curstyle land 3 = dispstyle then clr←3*rt else clr←rt;
+		delta1←(depth(num)+clr+rt/2)-(shiftup-axis);
+		delta2←(height(denom)+clr+rt/2)-(shiftdown+axis);
+		if delta1&gt;0 then
+			begin if delta2&gt;0 then
+				begin comment both get minimum clearance;
+				shiftup←shiftup+delta1;
+				shiftdown←shiftdown+delta2;
+				end
+			else	begin comment both get clearance of the good one;
+				shiftup←shiftup+delta1-delta2;
+				end;
+			end
+		else if delta2&gt;0 then shiftdown←shiftdown+delta2-delta1;
+		end;
+
+	comment Make the vlist box for the fraction;
+	r←getnode(boxnodesize);
+	height(r)←height(num)+shiftup; depth(r)←depth(denom)+shiftdown;
+	width(r)←width(num) # this also equals width(denom);
+	getavail(p); mem[num]←mem[num]+p;
+	if rt=0 then
+		begin comment no rule inserted;
+		mem[p]←fillgluespec+denom;
+		glueset(r)←(shiftup+shiftdown-depth(num)-height(denom))/
+			gluestretch(fillglue);
+		end
+	else	begin integer j; j←fractionrule(rt);
+		mem[p]←fillgluespec+j;
+		glueset(r)←(shiftup-depth(num)-rt/2-axis)/
+			gluestretch(fillglue);
+		getavail(p); mem[j]←mem[j]+p;
+		j←getnode(gluespecsize);
+		gluespace(j)←shiftdown+axis-height(denom)-rt/2;
+		mem[p]←(gluenode lsh typed)+(j lsh valued)+denom;
+		end;
+
+	comment Finally, put the fraction into a box with its delimiters;
+	s←mathpar(delim1+pd,cursize);
+	ld←varsymbol(ldelim(q),curstyle,s);
+	rd←varsymbol(rdelim(q),curstyle,s);
+	shiftamt(ld)←(height(ld)-depth(ld))/2-axis;
+	shiftamt(rd)←(height(rd)-depth(rd))/2-axis;
+	mem[ld]←mem[ld]+r; mem[r]←(vlistnode lsh typed)+(num lsh valued)+rd;
+	operand(q)←hpack(ld,-epsilon);
+	go to donescripts end;
+
+	[opnoad] begin integer b,m,p,upper,lower,f,c;
+	upper←supscr(q); lower←subscr(q) # upper and lower limits to operator;
+	if upper=0 and lower=0 then go to donescripts;
+	b←operand(q);if b=0 then b←nullbox;
+	comment Now set kern nonzero if the operator in box b is a single
+	character in the mathex font, having a nonzero ms field;
+	if field(type,m←mem[b])=hlistnode and field(link,c←mem[field(value,m)])=0
+	and (f←c lsh(-(7+links)))=mathfonttable(3) and
+	(m←field(ms,fontinfo[c lsh -links]))≠0 then kern←fmemreal(msbase[f]+m);
+	comment Did you get that?;
+	
+	if curstyle land 3 = dispstyle then
+		begin comment putting limits on operator in display mode;
+		integer change,middle,r,g; real maxw; label exit;
+		change←mem[q] land (1 lsh valued) # should convention be changed?;
+		if kern≠0 then change←change xor (1 lsh valued);
+		if change then go to exit # limits to appear at right of operator;
+		comment limits to be centered above and below the operator
+			(except modified by kern, the upper limit being shifted
+			right and the lower limit shifted left by kern/2 each);
+		if upper then
+			begin upper←cleanbox(upper);
+			shiftup←(bigopspacing(3)-depth(upper))max(bigopspacing(1));
+			end
+		else	begin upper←nullbox; shiftup←0;
+			end;
+		if lower then
+			begin lower←cleanbox(lower);
+			shiftdown←(bigopspacing(4)-height(lower))max
+				(bigopspacing(2));
+			end
+		else	begin lower←nullbox; shiftdown←0;
+			end;
+		maxw←width(b)-kern;
+		if width(lower)&gt;maxw then maxw←width(lower);
+		if width(upper)&gt;maxw then maxw←width(upper);
+		upper←rebox(upper,maxw,kern);
+		middle←rebox(cleanbox(b),maxw,kern/2);
+		lower←rebox(lower,maxw,0);
+		b←getnode(boxnodesize);
+		width(b)←maxw+kern;
+		height(b)←height(middle)-shiftamt(middle)+depth(upper)+height(upper)
+			+(if shiftup then shiftup+bigopspacing(5) else 0);
+		depth(b)←depth(middle)+shiftamt(middle)+height(lower)+depth(lower)
+			+(if shiftdown then shiftdown+bigopspacing(5) else 0);
+		if shiftup=0 then mem[upper]←mem[upper]+middle else
+			begin getavail(r); mem[upper]←mem[upper]+r;
+			g←getnode(gluespecsize);gluespace(g)←shiftup;
+			mem[r]←(gluenode lsh typed)+(g lsh valued)+middle;
+			getavail(r);g←getnode(gluespecsize);
+			gluespace(g)←bigopspacing(5);
+			mem[r]←(gluenode lsh typed)+(g lsh valued)+upper;
+			upper←r;
+			end;
+		if shiftdown=0 then mem[middle]←mem[middle]+lower else
+			begin getavail(r); mem[middle]←mem[middle]+r;
+			g←getnode(gluespecsize);gluespace(g)←shiftdown;
+			mem[r]←(gluenode lsh typed)+(g lsh valued)+lower;
+			getavail(r);g←getnode(gluespecsize);
+			gluespace(g)←bigopspacing(5);
+			mem[r]←(gluenode lsh typed)+(g lsh valued);
+			mem[lower]←mem[lower]+r;
+			end;
+		mem[b]←(vlistnode lsh typed)+(upper lsh valued);
+		operand(q)←b; go to donescripts;
+		exit: end end;
+
+	[accentnoad] begin integer p,r,b; real h,t;
+	comment Slants are not taken into account in mathmode accents, since
+		the sizes of math characters are already adjusted for slant;
+	p←boxchar(value(q),curstyle,false) # the accent character, in proper size;
+	b←cleanbox(operand(q));
+	getavail(r); mem[r]←((gluenode lsh typed)+(lowerfillglue lsh valued))+b;
+	mem[p]←mem[p]+r # make a vlist from p to r to b;
+	shiftamt(p)←(width(b)-width(p))/2.0 # center the accent;
+	h←height(b); t←mathpar(xheight,cursize) # We will raise the accent by h-t;
+	width(p)←0 # the accent won't count in determining the new width;
+	operand(q)←vpack(p,height(p)+h-t); end;
+	else confusion
+	  end;
+
+	comment Now we process the sub/superscripts of noad q;
+	b←operand(q);
+	if b≠0 and (t=opnoad or (c←value(b))=0 or link(c)≠0 or type(c)≠charnode or
+		shiftamt(b)≠0) then
+		begin comment the operand is not simply a character;
+		shiftup←height(b)-shiftamt(b)
+			-mathpar(supdrop,(c←fontsize[scrstyle[curstyle]]));
+		if shiftup&lt;0 then shiftup←0;
+		shiftdown←depth(b)+shiftamt(b)+mathpar(subdrop,c);
+		if shiftdown&lt;0 then shiftdown←0;
+		end
+	else shiftup←shiftdown←0.0;
+	comment shiftup and shiftdown are minimum amounts to shift baselines;
+	if supscr(q)=0 then
+		begin if subscr(q)=0 then go to donescripts;
+		comment subscript but no superscript;
+		d←cleanbox(subscr(q));
+		shiftdown←shiftdown max mathpar(sub1,cursize);
+		comment make sure that the subscript doesn't get above the baseline
+			plus four-fifths the xheight;
+		shiftdown←shiftdown max (height(d)-.8*(mathpar(xheight,cursize)));
+		shiftamt(d)←shiftdown;
+		if kern then
+			begin integer p,g # will contain glue of -kern;
+			getavail(p); g←getnode(gluespecsize);
+			mem[p]←(gluenode lsh typed)+(g lsh valued)+d;
+			gluespace(g)←-kern;
+			d←hpack(p,-epsilon);
+			end;
+		go to attachscript;
+		end;
+	shiftup←shiftup max mathpar(suptable[curstyle],cursize);
+	d←cleanbox(supscr(q));
+	comment make sure that the exponent doesn't get below the baseline plus
+		one-fourth the xheight;
+	shiftup←shiftup max(mathpar(xheight,cursize)/4+depth(d));
+	if subscr(q)=0 then
+		begin comment superscript but no subscript;
+		shiftamt(d)←-shiftup;
+		go to attachscript;
+		end;
+	comment both subscript and superscript;
+	shiftdown←shiftdown max mathpar(sub2,cursize);
+	c←cleanbox(subscr(q));
+	begin real delta; integer r;
+	if (delta←(depth(d)+height(c)+drt)-(shiftup+shiftdown))&gt;0 then
+		begin comment adjust scripts to ensure minimum clearance drt;
+		shiftup←shiftup+delta/2; shiftdown←shiftdown+delta/2;
+		end;
+	getavail(r); mem[d]←mem[d]+r;
+	mem[r]←fillgluespec+c;
+	shiftamt(c)←-kern # kern might be set if t=opnoad;
+	d←vpack(d,shiftdown+shiftup+height(d)); shiftamt(d)←shiftdown;
+	end;
+	
+	attachscript: comment Now d points to a box representing the
+		sub/superscripts, and b=operand(q) is the box to attach it to;
+	if b=0 then operand(q)←d
+	else	begin mem[b]←mem[b]+d; operand(q)←hpack(b,-epsilon);
+		end;
+
+	donescripts: if operand(q) then
+		begin b←operand(q); maxh←maxh max (height(b)-shiftamt(b));
+		maxd←maxd max (depth(b)+shiftamt(b));
+		end;
+	r←q; rtype←t;
+
+	advanceq: q←link(q);
+	end;
+
+comment The second pass simply goes through and inserts the appropriate spacing,
+returning the noads to free storage. It also handles leftnoads and rightnoads,
+since we now know maxh and maxd;
+
+q←p; rtype←-1; curstyle←style; cursize←fontsize[curstyle];
+mem[temphead]←0; curnode←temphead;
+define appnd(x)=⊂if x then begin mem[curnode]←mem[curnode]+x; curnode←x end⊃;
+
+while q do
+	begin label advanceq; integer x;
+	integer s # size of noad to be returned to free storage;
+	integer pen # penalty for breaking after this noad;
+	integer qq # temporary pointer;
+	s←noadsize; pen←-1 # set default values;
+	case t←type(q) of begin
+	[binnoad] pen←mbpen lsh valued;
+	[relnoad] pen←mrpen lsh valued;
+	[boxnoad][opnoad][opennoad][closenoad][punctnoad];
+	[abovenoad] begin s←noadsize+2; t←boxnoad end;
+	[sqrtnoad][overnoad][undernoad][accentnoad] t←boxnoad;
+	[leftnoad][rightnoad] begin real axis,s;
+	axis←mathpar(axisheight,fontsize[style]);
+	s←(maxh-axis) max (maxd+axis) # maximum distance from axis;
+	t←t-(leftnoad-opennoad) # left→open,right→close;
+	b←varsymbol(operand(q),curstyle,2.0*s);
+	shiftamt(b)←(height(b)-depth(b))/2-axis;
+	operand(q)←b end;
+	[nodenoad] begin s←1; x←value(q); if x=0 then go to advanceq;
+	if type(x)=discnode then
+		begin comment The font of a discretionary hyphen must be inserted;
+		integer c,f;
+		c←value(x) # 9-bit code for a math character;
+		f←mathfonttable(cursize+((c lsh -7) land 3));
+		setfield(value,mem[x],(f lsh 7)+(c land '177));
+		end;
+	appnd(x); go to advanceq end;
+	[stylenoad] begin s←1; curstyle←value(q); cursize←fontsize[curstyle];
+	go to advanceq end;
+	else confusion
+	  end;
+	
+	if rtype≥0 then
+		begin comment compute inter-element spacing;
+		integer g;
+		g←0; curquad←mathpar(quad,cursize);
+		case spacetable[rtype,t] of begin
+		[nospace];
+		[thinspace] g←mathglue(1/6,0,0);
+		[thspace] if cursize=0 then g←mathglue(1/6,0,0);
+		[thickspace] if cursize=0 then g←mathglue(5/18,5/18,0);
+		[opspace] if cursize=0 then g←mathglue(2/9,1/9,2/9);
+		else confusion
+		  end;
+		appnd(g);
+		end;
+	appnd(operand(q));
+	if pen≥0 and penalties and((qq←link(q))=0 or
+	  type(qq)≠nodenoad or (qq←value(qq))=0 or type(qq)≠penaltynode) then
+		begin integer x; getavail(x); mem[x]←(penaltynode lsh typed)+pen;
+		appnd(x);
+		end;
+	rtype←t;
+	
+	advanceq: r←link(q);
+	if s=1 then freeavail(q) else freenode(q,s);
+	q←r;
+	end;
+
+return(mem[temphead]);
+end;
+		
+forward recursive integer procedure boxfield(integer p,style;boolean c) # see below;
+
+recursive integer procedure evalmlist(integer p, style; boolean penalties);
+begin comment This procedure converts the general mlist pointed to by p
+into an hlist, using the given style for the main mlist. The effect is
+like mlist_to_hlist except that the given mlist may have sub-mlists, or it
+might refer to math characters that aren't already in boxes. This is the
+procedure which controls the implicit styles in math formulas. Recursion
+occurs when evalmlist calls boxfield which calls evalmlist;
+integer q,t,curstyle;
+
+q←p; curstyle←style;
+while q do
+	begin comment We must remove non-box fields from noad q;
+	label advanceq;
+	case type(q) of begin
+	[boxnoad][binnoad][relnoad][opennoad][closenoad][punctnoad][undernoad]
+	[accentnoad] operand(q)←boxfield(operand(q),curstyle,
+		supscr(q)≠0 or subscr(q)=0) # the latter parameter to boxfield
+		essentially makes a &quot;kerned&quot; symbol when there is a
+		subscript but no superscript, otherwise the italic correction
+		is included as the box is made;
+	[sqrtnoad][overnoad] operand(q)←boxfield(operand(q),undstyle[curstyle],
+		true);
+	[abovenoad] begin comment process numerator and denominator;
+	supscr(q)←boxfield(supscr(q),numstyle[curstyle],true);
+	subscr(q)←boxfield(subscr(q),denomstyle[curstyle],true); go to advanceq end;
+	[opnoad] begin comment check for a single character op in \mathex;
+	integer b,c; boolean singlchrxop;
+	if (c←operand(q) xor(flag lor '600))&lt;'200 then
+		begin integer d; singlchrxop←true;
+		if curstyle land 3=dispstyle and 
+		  (d←field(lg,fontinfo[(mathfonttable(3) lsh 7)+c]))≠largestlig then
+		operand(q)←operand(q)+d # use larger size if available;
+		end
+	else singlchrxop←false;
+	b←operand(q)←boxfield(operand(q),curstyle,true);
+	if singlchrxop then
+		begin comment Shift the character so that its height above the axis
+			exceeds its depth below the axis by the character height;
+		shiftamt(b)←-mathpar(axisheight,fontsize[curstyle])-.5*depth(b);
+		end;
+	end;
+	[stylenoad] begin integer v; if (v←value(q))&lt;8 then curstyle←v;
+	go to advanceq end;
+	[leftnoad][rightnoad][nodenoad] go to advanceq;
+	  else confusion end;
+	
+	supscr(q)←boxfield(supscr(q),scrstyle[curstyle],true);
+	subscr(q)←boxfield(subscr(q),undstyle[scrstyle[curstyle]],true);
+
+	advanceq: q←link(q);
+	end;
+
+return(mlist_to_hlist(p,style,penalties));
+end;
+
+recursive integer procedure boxfield(integer p, style; boolean corr);
+begin comment This procedure converts a noad field into the corresponding box.
+If corr is true, the italic correction occurs at the right of a single-character
+box. Recursion comes about when boxfield calls evalmlist which calls boxfield;
+
+if p≥0 then return(p) # nothing to do if already boxed;
+
+if p land (1 rot -2) then
+	begin comment p denotes a sub-mlist which should be boxed;
+	integer b,t; b←evalmlist(field(link,p),style,false);
+	if link(b)=0 then return(b) # this happens in particular if b=0;
+	return(hpack(b,-epsilon));
+	end;
+
+comment p denotes a single character which should be boxed;
+return(boxchar(p land '777, style, corr));
+end;
+comment Data structures for \halign and \valign: alignlist,alignrecord;
+
+comment A separate group of stacks (also maintained with convention #1) is used to
+tell what should be done when ⓧ and \cr occur in the input;
+
+internaldef alignsize=4 # max number of simultaneous alignments;
+internal saf integer array algnlststack[0:alignsize-1];
+internal integer alignlist # points to beginning of alignment record list;
+internal saf integer array algnrcrdstack[0:alignsize-1];
+internal integer alignrecord # points to alignment record in the list;
+internal saf integer array algnststack[0:alignsize-1];
+internal integer alignstate # if zero, getnext should interrupt ⓧ and \cr tokens;
+internal integer alignptr # stack pointer for alignments;
+
+comment To help understand the way alignment works, consider the example input
+
+	\halign to &lt;length&gt;{u1#v1 ⓧ u2#v2 ⓧ u3#v3 ⓧ u4#v4\cr
+	\noalign {\hrule}
+	\noalign {\hjust to size{...}}
+	x11ⓧx12ⓧx13\cr
+	x21\cr
+	\noalign {\vfill}
+	x31ⓧx32ⓧx33\cr}
+
+Here's what happens: The desired final &lt;length&gt; is placed on savestack.
+A list of five alignment records is created, pointed to by alignlist. The
+first record on that list contains a pointer to the tabskip glue that is
+to be used at the left of aligned lines, and the other four records
+contain pointers to uj,vj, and the tabskip glue to be used after column j.
+The other four records also contain a &quot;maxsofar&quot; field which will record
+the maximum natural width of the uj xij vj hlists;
+
+define alignrecordsize=5 # number of words in alignment record (first word is link);
+define listu(p)=⊂mem[p+1]⊃ # uj token list in an alignment;
+define listv(p)=⊂mem[p+2]⊃ # vj token list in an alignment;
+define maxsofar(p)=⊂memreal(p+3)⊃ # maximum width or height so far;
+define tabglue(p)=⊂mem[p+4]⊃ # pointer to tabskip glue;
+
+comment After the \noalign's are bypassed (they simply go onto the current vlist
+being built), the fact that x11 doesn't start with &quot;\noalign&quot; causes the
+startalignbox procedure to be invoked. This switches to -hmode and prepares
+to build an hlist of &quot;unset&quot; boxes. Procedure startunsetnode goes into a
+still deeper level of -hmode, sets the scanner to emit the tokenlist u1 and then
+to make alignstate zero. The scanner will increase alignstate by 1 for each { and
+decrease it by 1 for each }, and it checks for ⓧ or \cr when alignstate is zero.
+When x11 and the ⓧ have been scanned, alignstate is made infinitely negative,
+and procedure aligndelim uses the setting of alignrecord
+to cause the scanner emit the tokenlist v1. The end of this tokenlist is signalled
+by the command &quot;endv&quot;, which should occur at a &quot;stable&quot; time. Now endv stimulates
+procedure finishunsetnode to package up the hlist corresponding to u1 x11 v1.
+After alignrecord is advanced, the same thing happens to u2 x12 v2, and then to
+u3 x13 v3. Now that \cr occurred instead of ⓧ, the value of alignrecord is
+set negative-- the next endv will notice this negativity and will invoke
+procedure finishalignbox, causing this list of unset nodes to be packaged.
+At this point maxsofar has been set to the width of uj x1j vj for j = 1,2,3, but
+it remains 0.0 for j=4. By the time we reach the end of the alignment,
+the maxsofar entries will tell how wide the unset nodes should be. However,
+we already know the correct height and depth of the boxes containing unset nodes.
+
+Now that the first line has been aligned, alignrecord is &quot;rewound&quot; back to the
+beginning of the alignment record list, and the same process repeats again.
+Finally after &quot;\cr}&quot; the procedure endalign is called. It goes thru the
+vlist looking for boxes containing unset nodes, and repackages them to the
+desired widths.
+
+Note that the processing of \halign involves giving up control to most of the
+rest of TEX, with occasional bits and pieces of activity at critical junctures.
+One of the most critical of these junctures is the label &quot;aligntest&quot; in the
+main control routine.
+
+The alignment procedures are unaffected by the setting of hangbegin. (If a
+hanging indent were to terminate in the middle of an alignment, it isn't
+clear what should be done, so TEX simply sidesteps the problem.);
+comment Alignment procedures: (init|end)align,(start|finish)(alignbox|unsetnode);
+
+procedure initalign # beginning an \halign or \valign;
+begin comment This procedure is called when \halign or \valign has been
+scanned in an appropriate mode. Its function is to scan the preamble and to
+set up the alignlist records which control subsequent steps in the
+alignment process;
+
+integer p,q,itm;
+define storeitem=⊂begin p←q; getavail(q); mem[p]←(itm lsh infod)+q;end⊃
+	# stores previous item and makes it point to current one;
+
+if alignptr≥alignsize then overflow(alignsize);
+algnlststack[alignptr]←alignlist;
+algnrcrdstack[alignptr]←alignrecord;
+algnststack[alignptr]←alignstate;
+alignptr←alignptr+1 # push down the alignment stacks;
+
+pushnest;
+if mode=mmode then
+	begin mode←-vmode; prevdepth←auxstack[nestptr-2];
+	end
+else	begin mode←-abs(mode) # go into a restricted mode;
+	if mode=-hmode then spacefactor←1.0 # else prevdepth stays what it was;
+	end;
+comment Now mode is -vmode for \halign and -hmode for \valign;
+
+mode←(-hmode-vmode)-mode # temporary switch of modes for the benefit of scanspec;
+scanspec # put box size specification on savestack;
+mode←(-hmode-vmode)-mode # restore true mode;
+newsavelevel(aligncode) # This guards against extra }'s in the alignment;
+
+alignlist←getnode(alignrecordsize); alignrecord←alignlist;
+alignstate←-1000; curcmd←lbrace;
+while true do
+	begin comment Remember the current tabskip glue;
+	q←eqlink(tabskip); mem[q]←mem[q]+refct1; tabglue(alignrecord)←q;
+	if curcmd=carret then done # \cr sensed;
+	mem[alignrecord]←getnode(alignrecordsize); alignrecord←mem[alignrecord];
+	comment Now scan uj#vj;
+	q←holdhead; itm←0;
+	while true do
+		begin gettok;
+		while curcmd=assignglue and hashentry=tabskiploc do
+			begin integer p; p←scanglue;
+			eqdefine(tabskiploc,assignglue,p); gettok;
+			end;
+		comment The above might be called &quot;get non-tabskip token&quot;;
+		if curcmd=tabmrk or curcmd=carret then
+			begin backerror(&quot;Missing # inserted in alignment preamble&quot;);
+			done;
+			end;
+		if curcmd=macprm then done;
+		storeitem; itm←curtok;
+		end;
+	mem[q]←itm lsh infod # store last item of uj tokenlist;
+	listu(alignrecord)←mem[holdhead] # store pointer to the tokenlist;
+
+	q←holdhead; itm←0 # Now start again;
+	while true do
+		begin gettok;
+		while curcmd=assignglue and hashentry=tabskiploc do
+			begin integer p; p←scanglue;
+			eqdefine(tabskiploc,assignglue,p); gettok;
+			end;
+		if curcmd=tabmrk or curcmd=carret then done;
+		if curcmd=macprm then
+			begin error(&quot;Only one # allowed per tab&quot;);
+			continue;
+			end;
+		storeitem; itm←curtok;
+		end;
+	storeitem;
+	mem[q]←endv lsh (cmdd+infod) # append endv command to vj;
+	listv(alignrecord)←mem[holdhead] # store pointer to vj tokenlist;
+	maxsofar(alignrecord)←0.0;
+	end;
+end;
+
+simple procedure startalignbox;
+begin comment We are beginning a new hlist or vlist to be haligned or valigned,
+having just scanned a \cr;
+pushnest; mode←(-hmode-vmode)-mode;
+if abs(mode)=hmode then spacefactor←1.0 else prevdepth←pflag;
+alignrecord←mem[alignlist] # &quot;rewind&quot; to point to u1,v1;
+end;
+
+simple procedure startunsetnode;
+begin comment We are beginning a new tab position to be haligned or valigned;
+pushnest;
+if mode=-hmode then spacefactor←1.0 else prevdepth←pflag;
+pushinput; state←tokenlist;
+if alignrecord&lt;0 then mustquit;
+loc←listu(alignrecord); recovery←-((2 lsh infod)+loc) # insert uj into the input;
+comment The getnext routine will turn alignstate zero when uj is exhausted,
+and when the 0-level ⓧ or \cr appears it will call the aligndelim procedure below;
+end;
+
+internal procedure aligndelim # do this when ⓧ or \cr is scanned;
+begin if alignrecord&lt;0 then mustquit;
+if curcmd=tabmrk and mem[alignrecord]=0 then error(&quot;Extra ⓧ&quot;)
+else	begin comment Now we insert the current vlist into the input. When it is
+	completed, endv will occur and finishunsetnode will be invoked;
+	alignstate←-1000;
+	pushinput; state←tokenlist; loc←listv(alignrecord);
+	recovery←-((1 lsh infod)+loc);
+	if curcmd=carret then alignrecord←-alignrecord;
+	end;
+end;
+
+procedure finishunsetnode;
+begin comment The hlist or vlist just formed is to be packaged into a box
+whose glue parameter will be set later. This box is appended to the list of
+such boxes which is being maintained on the next lower level of nesting;
+integer p,q;
+q←abs(alignrecord) # alignrecord will have been negated if \cr was sensed;
+if mode=-hmode then
+	begin p←hpackage(head,-epsilon,false);
+	dsnodelist(mem[inserts]);
+	if width(p)&gt;maxsofar(q) then maxsofar(q)←width(p);
+	mem[p]←mem[p]+((unsetnode-hlistnode) lsh typed) # change to unset node;
+	end
+else	begin p←vpackage(head,-epsilon,false);
+	if height(p)+depth(p)&gt;maxsofar(q) then maxsofar(q)←height(p)+depth(p);
+	mem[p]←mem[p]+((unsetnode-vlistnode) lsh typed) # change to unset node;
+	end;
+if str&gt;0 then glueset(p)←str # save the amount of glue stretch;
+popnest;
+mem[curnode]←mem[curnode]+p; curnode←p;
+end;
+
+simple procedure finishalignbox # packages a list of unset nodes;
+begin comment The hlist or vlist just formed consists entirely of unset boxes
+that will be set when the current alignment is completed;
+integer p;
+if mode=-hmode then
+	begin p←hpackage(head,-epsilon,false); dsnodelist(mem[inserts]);
+	end
+else p←vpackage(head,-epsilon,false);
+popnest;
+append(p);
+end;
+
+procedure endalign # ending an \halign or \valign;
+begin comment This procedure is called when the end of an alignment
+(e.g., \cr}) has been scanned;
+integer p,prevp,pp,q,qq;
+curlev←curlev-level1;
+saveptr←saveptr-2 # Now savestack is returned to its state before the
+	\halign or \valign, and savestack[saveptr] contains the box size spec
+	(the endv routine has ensured this);
+prevp←head; p←mem[prevp] # p will run through the current vlist or hlist,
+	looking for boxes composed of unset nodes;
+while p do
+	begin if(type(p)=hlistnode or type(p)=vlistnode)
+		and (pp←value(p)) and type(pp)=unsetnode
+	then	begin alignrecord←alignlist;
+		q←holdhead; mem[holdhead]←0 # q will be used to construct new list;
+		while true do
+			begin integer g,s; getavail(s);
+			g←tabglue(alignrecord); mem[g]←mem[g]+refct1;
+			mem[q]←mem[q]+s; q←s;
+			mem[q]←(gluenode lsh typed)+(g lsh valued);
+			alignrecord←mem[alignrecord];
+			if alignrecord=0 then done;
+			if pp then
+				begin real l;
+				if mode=-vmode then
+					begin comment element of \halign;
+					l←width(pp);
+					width(pp)←maxsofar(alignrecord);
+					mem[pp]←mem[pp]-
+					 ((unsetnode-hlistnode)lsh typed);
+					end
+				else	begin comment element of \valign;
+					l←height(pp)+depth(pp);
+					height(pp)←maxsofar(alignrecord)-depth(pp);
+					mem[pp]←mem[pp]-
+					 ((unsetnode-vlistnode)lsh typed);
+					end;
+				if glueset(pp) then glueset(pp)←
+					 (maxsofar(alignrecord)-l)/glueset(pp);
+				qq←pp; pp←link(pp); setlink(qq,0);
+				end
+			else	begin comment This tab position was omitted;
+				qq←getnode(boxnodesize) # prepare for empty box;
+				if mode=-vmode then
+					begin mem[qq]←hlistnode lsh typed;
+					width(qq)←maxsofar(alignrecord);
+					comment We needn't make glueset(qq)≠0;
+					end
+				else	begin mem[qq]←vlistnode lsh typed;
+					height(qq)←maxsofar(alignrecord);
+					comment We needn't made glueset(qq)≠0;
+					end;
+				end;
+			mem[q]←mem[q]+qq; q←qq;
+			end;
+		comment Now mem[holdhead] points to the aligned list;
+		if mode=-vmode then
+			begin pp←hpackage(holdhead,
+			memory[location(savestack[saveptr]),real],false);
+			dsnodelist(mem[inserts]);
+			end
+		else pp←vpackage(holdhead,
+			memory[location(savestack[saveptr]),real],false);
+		setlink(prevp,pp);q←p;p←link(p);freenode(q,boxnodesize);
+		mem[pp]←mem[pp]+p; prevp←pp;
+		end
+	else	begin prevp←p; p←link(p);
+		end;
+	end;
+alignrecord←alignlist;
+while true do
+	begin delgluelink(tabglue(alignrecord));
+	dslist(listu(alignrecord)); dslist(listv(alignrecord)) # free storage;
+	q←mem[alignrecord]; freenode(alignrecord,alignrecordsize);
+	if q=0 then done else alignrecord←q;
+	end;
+auxstack[nestptr-1]←aux; p←mem[head];
+popnest;
+if mode=mmode then
+	begin comment end of \halign in display mode inserts dispskip glue;
+	integer q,r,s;
+	getavail(r); getavail(s); q←eqlink(dispskip);
+	mem[q]←mem[q]+2*refct1 # increase reference count;
+	mem[r]←(gluenode lsh typed)+(q lsh valued)+p;
+	mem[prevp]←mem[prevp]+s;
+	mem[s]←(gluenode lsh typed)+(q lsh valued);
+	contrib←r;
+	curndstack[nestptr-1]←s # curnode of the page builder;
+	auxstack[nestptr-1]←aux # prevdepth of the page builder;
+	incompleatnoad←0;
+	end
+else	begin comment otherwise simply append to the current list;
+	mem[curnode]←mem[curnode]+p; curnode←prevp;
+	end;
+alignptr←alignptr-1 # now pop up the alignment stacks;
+alignstate←algnststack[alignptr];
+alignrecord←algnrcrdstack[alignptr];
+alignlist←algnlststack[alignptr];
+end;
+comment Beginning of the main procedure: maincontrol;
+
+internal procedure maincontrol # governs all the activities;
+begin comment This procedure contains the master switch which causes
+all the various pieces of TEX to do their things in the right order --
+unless the user's input contains unexpected strangenesses. We have
+here the grand climax of the program, the applications of all the tools
+we have so laboriously constructed. And it's also the messiest part
+of the program, in the sense that it necessarily refers to other
+pieces of code all over the place;
+
+label bigswitch # go here in order to get next input token and then carry
+	out the corresponding command, based on the current mode;
+label reswitch # same as bigswitch but using the current input token;
+label fallthru # go here when an invalid command appears in the input;
+label missingfont # go here when we must stop because no font was defined;
+label missingbrace # go here when unsave produced an unexpected incomplete block;
+label addtopage # attaches page contribution list to the current page;
+label ejectpage # break a page in the best known place and invoke output routine;
+label endoutput # go here at end of output routine;
+label endpageout # output a page that's really completed;
+label aligntest # go here after the \cr in alignments;
+label scanbox # scan a box including the first token;
+label beginbox # scan a box not including the first token;
+label justbox # go here when done building a list for a box;
+label boxend # go here when done building a box;
+label topbotinsend # go here at end of topinsert or botinsert;
+label simpleappend # go here to put one-word item onto current list;
+label scanmathend # go here to finish scanning a box in math mode;
+label mathchar # go here to append a math character to an mlist;
+label addtomlist # go here to append a noad to an mlist;
+label makemathbox # go here to complete a box noad;
+label scanmath # go here to scan a character or {...} in math mode;
+label outputonly # go here after illegal use of operation outside \output routine;
+
+integer curbox # recently built box;
+integer curnoad # recently built noad;
+integer curitem # one-word item to be stored;
+integer curins # insertion spec for current contribution to page;
+integer savedpageno # value of kount[&quot;0&quot;] before output routine invoked;
+integer deadcycles # number of times output routine has yielded null box;
+DEBUGONLY boolean checkingmem # trying to find where memory dies;
+
+define checkpriv = ⊂if mode&lt;0 then go to fallthru⊃
+	# checks if we're currently in a privileged mode;
+
+comment Upon entry to this procedure, the semantic stacks are initialized;
+nestptr←0; mode←vmode # page builder in control;
+mem[pagehead]←mem[contribhead]←mem[waitinghead]←0;
+pagetail←pagehead; curnode←contribhead; waitingtail←waitinghead # lists empty;
+head←contribhead;
+prevdepth←pflag;
+alignptr←alignlist←alignrecord←0;alignstate←-1000;
+outputdormant←true;
+hangbegin←1000000;hangfirst←false;
+deadcycles←0;
+justpar←jpar;
+DEBUGONLY checkingmem←false;
+
+bigswitch: getnext;
+DEBUGONLY if checkingmem then checkmem(false);
+reswitch: case abs(mode)+curcmd of begin
+comment For each valid combination of mode and cmd the following cases show
+what to do and where to go next. Invalid combinations will fall through to the
+end of this long case statement, where label &quot;&quot;fallthru&quot; appears;
+
+[vmode+0][hmode+0][mmode+0] begin error(&quot;Undefined control sequence&quot;);
+go to bigswitch end;
+
+[vmode+lbrace][hmode+lbrace] begin newsavelevel(simpleblock);
+go to bigswitch end # ordinary &quot;{&quot; simply affects the block structure but
+	not the mode or the current list;
+
+[mmode+lbrace] begin newsavelevel(mathblock);
+comment See also label scanmath for another kind of block in math mode;
+pushnest; incompleatnoad←0 # begin to form sub-mlist;
+go to bigswitch end;
+
+[vmode+rbrace][hmode+rbrace][mmode+rbrace] begin comment Now we clear the
+top levels of the savestack and branch to the appropriate routine;
+case unsave of begin
+	[bottomlevel] begin error(&quot;Too many }'s&quot;); go to bigswitch end;
+	[simpleblock] go to bigswitch;
+	[trueend] begin do getnctok until curcmd≠spacer;
+	if curcmd≠elsecode then backerror(&quot;Missing \else inserted&quot;);
+	passblock # bypass the else clause;
+	go to bigswitch end;
+	[mathcode][mathleft] begin alignstate←alignstate+1; error(&quot;Extra }&quot;);
+	saveptr←saveptr+1; curlev←curlev+level1; go to bigswitch end;
+	[aligncode] begin curtok←rbrace lsh cmdd; backerror(&quot;Missing \cr inserted&quot;);
+	curlev←curlev+level1;
+	saveptr←saveptr+1; curcmd←carret; aligndelim; go to bigswitch end;
+	[outputend] go to endoutput;
+	[noalignend] go to aligntest;
+	[topinsend][botinsend] go to topbotinsend;
+	[justend] begin saveptr←saveptr-2; go to justbox end;
+	[mathblock] begin curbox←finishmlist(0); go to makemathbox end;
+	[endscanmath] begin curitem←finishmlist(0); saveptr←saveptr-1;
+	go to scanmathend end;
+	[endvcenter] begin curnoad←getnode(noadsize);
+	mem[curnoad]←(boxnoad lsh typed)+(1 lsh valued) # special box noad;
+	operand(curnoad)←vpackage(head,-epsilon,false) # box the current vlist;
+	popnest; go to addtomlist end;
+	else confusion
+	  end; end;
+
+[vmode+mathbr][vmode+letter][vmode+otherchar][vmode+noindent][vmode+accent]
+[vmode+nonmathletter] begin integer q;
+checkpriv # beginning of a paragraph, must be in +vmode;
+q←eqlink(parskip);store((gluenode lsh typed)+(q lsh valued));
+mem[q]←mem[q]+refct1;
+pushnest; mode←hmode; spacefactor←1.0;
+if curcmd=noindent then go to bigswitch;
+q←getnode(boxnodesize); mem[curnode]←q; curnode←q;
+mem[q]←hlistnode lsh typed;
+width(q)←pagemem[parindentmem] # We needn't bother to make glueset(q)≠0,
+	even though this empty box has nonstandard dimensions,
+	since it won't appear in a formula;
+go to reswitch end;
+
+[hmode+mathbr] begin if mathfonttable(0)&lt;0 or mathfonttable(1)&lt;0
+or mathfonttable(2)&lt;0 or mathfonttable(3)&lt;0 then go to missingfont;
+mathfonttable(7)←mathfonttable(11)←mathfonttable(3) # fill in redundancies;
+newsavelevel(mathcode) # guard against extra }'s between the $'s;
+getnctok; if curcmd≠mathbr then
+	begin comment single $ sensed (beginning of formula in text);
+	pushnest; mode←-mmode; incompleatnoad←0; go to reswitch;
+	end;
+comment $$ sensed (beginning of displayed formula);
+checkpriv # make sure we're in the paragraph builder;
+if mem[head]=0 then
+	begin comment display at beginning of nonindented paragraph;
+	abovedisplaywidth←1000000.0 # disable correction for previous line;
+	popnest # forget the null paragraph and return to vmode of page builder;
+	end
+else	begin comment Output the paragraph so far;
+	finishparagraph;
+	abovedisplaywidth←lastwidth+2.0*mathpar(quad,textsize) # save the
+		length of final line plus two quads;
+	hangbegin←hangbegin-lines # maintain count for hanging indent;
+	end;
+pushnest; mode←mmode; incompleatnoad←0; eqnobox←0; go to addtopage end;
+
+[mmode+eqno] begin checkpriv; pushnest; mode←-mmode; incompleatnoad←0;
+newsavelevel(mathcode); go to bigswitch end;
+
+[mmode+mathbr] begin integer p,m; m←mode;
+if unsave≠mathcode then go to missingbrace;
+p←finishmlist(0) land ((1 lsh links)-1);
+comment Now p is 0 or points to the completed noad list for the formula.
+The nest has been popped to its previous level;
+if m&gt;0 then
+	begin comment end of displayed math, we're now in vmode of the page builder;
+	getnctok; if curcmd≠mathbr then
+		backerror(&quot;Display math should end with $$&quot;);
+	p←compactlist(evalmlist(p,dispstyle,false));
+	finishdisplay(p) # append displayed equation to page;
+	getnctok; if curcmd≠spacer then backinput # ignore space after closing $$;
+	pushnest; mode←hmode; spacefactor←1.0 # prepare to resume paragraph;
+	go to addtopage;
+	end;
+p←compactlist(evalmlist(p,textstyle,true));
+if mode=mmode then
+	begin comment p points to the hlist for an equation number;
+	eqnobox←hpack(p,-epsilon);
+	go to reswitch # the $ after an equation number does double duty;
+	end;
+comment Now p points to the hlist for a math formula in text. We will surround it
+	with hyphenation control nodes and append it to the current hlist;
+store((hyphnode lsh typed)+p);
+while (p←link(curnode))≠0 do curnode←p;
+store((hyphnode lsh typed)+(1 lsh valued)); spacefactor←1.0; go to bigswitch; end;
+
+[vmode+tabmrk][vmode+carret][hmode+tabmrk][hmode+carret][mmode+tabmrk][mmode+carret]
+begin error(&quot;There's no \halign or \valign going on&quot;); go to bigswitch end;
+
+[mmode+supmrk][mmode+submrk] begin integer prevsetting; prevsetting←0;
+if curnode=head or type(curnode)≥abovenoad
+or (prevsetting←mem[curnode+curcmd-supdelta])≠0 then
+	begin comment insert dummy noad to be sub/superscripted;
+	integer p; p←getnode(noadsize);
+	mem[curnode]←mem[curnode]+p;
+	if prevsetting then error(&quot;Double &quot;&amp;
+		(if curcmd=supmrk then &quot;super&quot; else &quot;sub&quot;)&amp;&quot;script&quot;);
+	curnode←p;
+	end;
+savestack[saveptr]←curnode+curcmd-supdelta # location of supscr or subscr field;
+go to scanmath; end;
+
+[vmode+spacer][vmode+parend][mmode+spacer] go to bigswitch;
+
+[hmode+spacer][hmode+exspace] begin integer p,curfont; curfont←eqlink(font);
+if curfont&gt;'37 then go to missingfont;
+p←fontglue+curfont*gluespecsize # this glue has infinite reference count;
+if spacefactor ≠ 1.0 and curcmd≠exspace then
+	begin integer q;
+	q←getnode(gluespecsize);
+	gluespace(q)←gluespace(p);
+	gluestretch(q)←gluestretch(p)*spacefactor;
+	glueshrink(q)←glueshrink(p)/spacefactor;
+	p←q;
+	end;
+store((p lsh valued)+(gluenode lsh typed));
+go to bigswitch end;
+
+[hmode+mathstyle] case curchar of begin
+[negthinspace] begin comment This is the routine for \!;
+getnctok; if curcmd≠spacer then go to reswitch else go to bigswitch end;
+[quadspace] begin comment \quad in horizontal mode;
+integer q,curfont; curfont←eqlink(font);
+if curfont&gt;'37 then go to missingfont;
+q←getnode(gluespecsize);
+gluespace(q)←fontpar(curfont,quad);
+store((q lsh valued)+(gluenode lsh typed)); go to bigswitch end;
+else go to fallthru
+  end;
+
+[mmode+exspace][mmode+mathstyle] begin store((stylenoad lsh typed)+
+(curchar lsh valued)); go to bigswitch; end;
+
+[mmode+letter][mmode+otherchar] begin curchar←mathdecode[curchar];
+go to mathchar end;
+[mmode+mathonly] go to mathchar;
+[mmode+ascii] begin curchar←scannumber land '777; go to mathchar end;
+
+[hmode+letter][hmode+otherchar][hmode+nonmathletter] begin integer t,x; label pchar;
+integer lchar # character most recently gobbled up;
+integer curfont # current font number;
+curfont←eqlink(font); if curfont&gt;'37 then go to missingfont;
+lchar←curchar;
+pchar: if sftable[curchar] and
+(field(type,t←mem[curnode])≠charnode or (t←(t lsh -valued) land '177)&lt;&quot;A&quot; or t&gt;&quot;Z&quot;)
+then spacefactor←sftable[curchar] # No spacefactor correction is made after
+	upper case letters (consider, e.g., &quot;D. E. Knuth&quot;);
+t←(curfont lsh 7)+curchar;
+x←fontinfo[t];
+getnext;
+if ufield(lg,x)≠0 then
+	begin label loop, nolig; integer j,f;
+	j←field(lg,x)+lgbase[curfont];
+	while true do
+		begin if(curchar xor fmem[j])land '177 = 0 and
+		(curcmd=letter or curcmd=otherchar)
+		then	begin comment second letter of ligature pair found;
+			integer p;
+			lchar←curchar;
+			curchar←(fmem[j] lsh -18) land '777;
+			if curchar&lt;'200 then go to pchar;
+			comment It's a kern specification, not a ligature;
+			p←getnode(kernnodesize);
+			store((t lsh valued)+p) # store a charnode;
+			mem[p]←kernnode lsh typed;
+			gluespace(p)←fmemreal(j+curchar-'200);
+			curnode←p; curchar←lchar; go to reswitch;
+			end;
+		if fmem[j]&lt;0 then done;
+		j←j+1;
+		end;
+	end;
+store(t lsh valued);
+if lchar land '177 = &quot;-&quot; then store(penaltynode lsh typed) # break without
+	penalty is allowed after explicit hyphens;
+go to reswitch end;
+
+[hmode+parend] begin if mode&lt;0 then go to bigswitch;
+if mem[head] then finishparagraph else popnest;
+hangbegin←1000000; hangfirst←false # reset hanging indent;
+go to addtopage end;
+
+[mmode+parend][mmode+endv] begin curtok←curcmd lsh cmdd;
+backerror(&quot;Missing $ inserted&quot;); curcmd←mathbr; go to reswitch end;
+
+[vmode+endv][hmode+endv] begin if unsave≠aligncode then go to missingbrace;
+finishunsetnode;
+newsavelevel(aligncode);
+if alignrecord&lt;0 then
+	begin finishalignbox; go to aligntest;
+	end;
+alignrecord←mem[alignrecord]; startunsetnode; go to bigswitch end;
+
+[vmode+call][hmode+call][mmode+call] begin macrocall; go to bigswitch end;
+
+[vmode+xt][hmode+xt][mmode+xt] begin extop; go to bigswitch end;
+
+[vmode+assignreal][hmode+assignreal][mmode+assignreal] begin
+pagemem[curchar]←scanlength; go to bigswitch end;
+
+[vmode+assignglue][hmode+assignglue][mmode+assignglue] begin integer p,h;
+comment This is for things like \lineskip, \parskip, etc.;
+h←hashentry; p←scanglue; eqdefine(h,assignglue,p); go to bigswitch end;
+
+[vmode+font][hmode+font] begin eqdefine(fontloc,font,scanfont); go to bigswitch end;
+
+[vmode+def][hmode+def][mmode+def] begin macrodef(curchar); go to bigswitch end;
+ 
+[vmode+output][hmode+output][mmode+output] begin 
+if outputroutine then delrclink(outputroutine);
+outputroutine←scantoks; go to bigswitch end;
+
+[vmode+innput] begin inputfile;go to bigswitch end;
+
+[vmode+stop] begin checkpriv;
+if pagehead=pagetail then
+	begin if deadcycles=0 or deadcycles&gt;25 then
+		begin if curlev≠level1 then print(nextline,
+			&quot;(\end occurred on level &quot;,(curlev-level1)lsh-idlevd,&quot;)&quot;);
+		return;
+		end;
+	pagetail←getnode(boxnodesize); mem[pagetail]←hlistnode lsh typed;
+	height(pagetail)←pagemem[vsizemem]; width(pagetail)←pagemem[hsizemem];
+	mem[pagehead]←pagetail # append empty box (dummy page);
+	end;
+comment That was the normal way to terminate TEX. The condition pagehead=pagetail
+implies that waitinghead=waitingtail and contrib=0. But if pagehead≠pagetail,
+we need to flush out everything that is still waiting to be output;
+curtok←hashentry; backinput; curcmd←eject; go to reswitch end;
+
+[vmode+ddt][hmode+ddt][mmode+ddt] begin if tracing land 4 then dumpactivities;
+if tracing land '40 then error(&quot;OK&quot;);
+DEBUGONLY bail;
+go to bigswitch end;
+
+[vmode+ascii][hmode+ascii] begin curchar←scannumber land '177;
+curcmd←otherchar; go to reswitch; end;
+
+[vmode+chcode][hmode+chcode][mmode+chcode] begin integer j; j←curchar;
+j←scannumber+j # j now identifies the parameter or character code location;
+getnctok # this token is ignored, it might be space or = or ←, etc.;
+if curcmd=endv then backerror(&quot;Missing } inserted&quot;);
+chcodedef(j,scannumber); justpar←jpar; go to bigswitch end;
+
+[vmode+fntfam][hmode+fntfam] begin integer c; c←curchar;
+chcodedef(128+c,scanfont);
+if c≠3 then
+	begin chcodedef(128+c+scrsize,scanfont);
+	chcodedef(128+c+scrscrsize,scanfont);
+	end;
+go to bigswitch end;
+
+[vmode+setcount][hmode+setcount][mmode+setcount] begin integer d; d←scandigit;
+kount[d]←scannumber;
+if nbrsign=&quot;-&quot; then kount[d]←-kount[d];
+go to bigswitch end;
+
+[vmode+advcount][hmode+advcount][mmode+advcount] begin integer d; d←scandigit;
+if kount[d]≥0 then kount[d]←kount[d]+1 else kount[d]←kount[d]-1;
+go to bigswitch end;
+
+[vmode+count][hmode+count][mmode+count] begin integer d; d←scandigit;
+insnum(kount[d]); go to bigswitch end;
+
+[vmode+ifeven][hmode+ifeven][mmode+ifeven] begin integer d; d←scandigit;
+scancond((kount[d]+1)land 1);
+go to bigswitch end;
+
+[vmode+ifT][hmode+ifT][mmode+ifT] begin integer c; getnctok; if curcmd=endv then
+backerror(&quot;Missing } inserted&quot;) else c←curchar; getnctok; if curcmd=endv then
+backerror(&quot;Missing } inserted&quot;) else scancond(curchar=c);
+comment Although an endv code is unlikely here, it is best to make sure that
+endv can't be gobbled up under any circumstances;
+go to bigswitch end;
+
+[vmode+box][hmode+box][mmode+box] begin savestack[saveptr]←0; go to beginbox end;
+
+[vmode+hmove][hmode+vmove][mmode+vmove] begin integer c; real shft;
+c←curchar; shft←scanlength; if nbrsign=&quot;-&quot; then shft←-shft;
+if c then shft←-shft # moveleft or raise negates the amount of shift;
+savestack[saveptr]←memory[location(shft),integer]; go to scanbox end;
+
+[vmode+save][hmode+save][mmode+save] begin savestack[saveptr]←scandigit;
+go to scanbox end;
+
+[vmode+leaders][hmode+leaders] begin savestack[saveptr]←&quot;:&quot;; go to scanbox end;
+
+[vmode+halign][hmode+valign][mmode+halign] begin if mode=-mmode then go to fallthru;
+initalign; go to aligntest end;
+
+[vmode+vskip][hmode+hskip][mmode+hskip] begin integer p;
+if curchar then p←scanglue else p←fillglue;
+curitem←(p lsh valued)+(gluenode lsh typed); go to simpleappend end;
+
+[vmode+hrule][hmode+vrule] begin integer p; p←scanrulespec;
+mem[curnode]←mem[curnode]+p; curnode←p;
+if abs(mode)=vmode then
+	begin prevdepth←pflag;
+	if mode&gt;0 then go to addtopage else go to bigswitch;
+	end;
+spacefactor←1.0; go to bigswitch end;
+
+[vmode+topbotins][hmode+topbotins] begin integer j; checkpriv;
+j←curchar; pushnest; mode←-vmode; prevdepth←pflag;
+scanlb; newsavelevel(botinsend+j); go to bigswitch end;
+
+[vmode+topbotmark][hmode+topbotmark][mmode+topbotmark] begin integer p;
+if outputdormant then go to outputonly;
+if curchar then p←topmark else p←botmark;
+if p then
+	begin insrclist(p); newsavelevel(simpleblock);
+	end;
+go to bigswitch end;
+
+[vmode+mark] begin integer p; checkpriv;
+p←scantoks;
+store((p lsh valued)+(marknode lsh typed));
+go to addtopage end;
+
+[vmode+penlty][hmode+penlty][mmode+penlty] begin integer n;
+n←scannumber;if nbrsign=&quot;-&quot; then n←(-(n min(1 lsh(values-1))))land((1 lsh values)-1)
+else if n≥(1000 min infpen) then n←infpen;
+comment In other words, any penalty less than the minimum we can store is stored as
+the minimum, and any penalty greater than the maximum or ≥1000 is stored as the max;
+curitem←(penaltynode lsh typed)+(n lsh valued);
+go to simpleappend end;
+
+[vmode+eject][hmode+eject][mmode+eject] begin if mode=+mmode then go to fallthru;
+curitem←ejectnode lsh typed; go to simpleappend end;
+
+[hmode+discr] begin integer curfont; curfont←eqlink(font);
+if curfont&gt;'37 then go to missingfont;
+store((((curfont lsh 7)+(curchar land '177))lsh valued)
++(discnode lsh typed)); go to bigswitch end;
+
+[mmode+discr] begin curitem←(curchar lsh valued)+(discnode lsh typed);
+go to simpleappend end;
+
+[vmode+newaccent][hmode+newaccent][mmode+newaccent] begin curchar←scannumber;
+if abs(mode)≠mmode then curchar←curchar land '177 else curchar←curchar land '777;
+curcmd←accent; go to reswitch end;
+
+[hmode+accent] begin integer a,b,c,f,p,q,r,x,curfont; real s,t,w,h;
+curfont←f←eqlink(font); if f&gt;'37 then go to missingfont;
+a←curchar+(f lsh 7); s←fontpar(f,slant); t←fontpar(f,xheight);
+comment a is the accent, it has slant s and is designed for characters of height t;
+while true do
+	begin getnctok;
+	if curcmd≠font then done;
+	eqdefine(fontloc,font,curfont←scanfont);
+	end;
+if curcmd=ascii then curchar←scannumber land '177
+else if curcmd≠letter and curcmd≠otherchar and curcmd≠nonmathletter then
+	begin error(&quot;Only single characters can be accented in horizontal mode&quot;);
+	go to reswitch;
+	end;
+q←getnode(boxnodesize);
+getavail(p); mem[p]←(c←curchar+(curfont lsh 7)) lsh valued # charnode for accentee;
+getavail(r); mem[r]←((gluenode lsh typed)+(lowerfillglue lsh valued))+p;
+comment lowerfillglue is used here since it will have to shrink;
+getavail(p); mem[p]←(a lsh valued) # charnode for the accenter;
+mem[q]←(hlistnode lsh typed)+(p lsh valued)+r;
+height(q)←charht(f,x←fontinfo[a]);
+width(q)←charwd(f,x); depth(q)←chardp(f,x);
+h←charht(curfont,x←fontinfo[c]); w←charwd(curfont,x);
+shiftamt(q)←(w-width(q))/2+fontpar(curfont,slant)*h-s*t;
+b←vpack(q,height(q)+h-t); width(b)←w;
+mem[curnode]←mem[curnode]+b; curnode←b; go to bigswitch end;
+
+[mmode+accent][mmode+mathinput] begin curnoad←getnode(noadsize);
+if curcmd=accent then mem[curnoad]←(accentnoad lsh typed)+(curchar lsh valued)
+else mem[curnoad]←curchar lsh typed # curchar is the type of noad;
+mem[curnode]←mem[curnode]+curnoad; curnode←curnoad;
+savestack[saveptr]←curnoad+1 # put location of operand field onto savestack;
+go to scanmath end;
+
+[mmode+leftright] begin integer p; p←curchar # leftnoad or rightnoad;
+if p=rightnoad and unsave≠mathleft then
+	begin integer garbage;
+	if savestack[saveptr]≠-mathcode then go to missingbrace;
+	garbage←scandelim; error(&quot;Extra \right&quot;);
+	saveptr←saveptr+1; curlev←curlev+level1 # restore mathcode on savestack;
+	go to bigswitch;
+	end;
+curnoad←getnode(noadsize); mem[curnoad]←p lsh typed;
+operand(curnoad)←scandelim;
+if p=leftnoad then
+	begin comment enter a new level of braces (\left is like {\left);
+	newsavelevel(mathleft);
+	pushnest; incompleatnoad←0;
+	mem[head]←curnode←curnoad;
+	go to bigswitch;
+	end;
+comment p=rightnoad, conclude the old level of braces (\right is like \right});
+curbox←finishmlist(curnoad); go to makemathbox end;
+
+[mmode+above] begin if incompleatnoad≠0 then
+	begin comment two \above's in same mlist;
+	real garbage;
+	case curchar of begin
+	[0] garbage←scanlength;
+	[1][2] ;
+	[3] begin garbage←scandelim;garbage←scandelim; end;
+	  else confusion end;
+	error(&quot;Ambiguous, you need another { and }&quot;); go to bigswitch;
+	end;
+incompleatnoad←getnode(noadsize+2); mem[incompleatnoad]←abovenoad lsh typed;
+if mem[head] then supscr(incompleatnoad)←mem[head] lor fflag # the numerator mlist;
+case curchar of begin
+[0] aboverule(incompleatnoad)←scanlength # \above &lt;length&gt;;
+[1] # \atop;
+[2] aboverule(incompleatnoad)←defaultrulethickness # \over;
+[3] begin ldelim(incompleatnoad)←scandelim;
+rdelim(incompleatnoad)←scandelim; end # \comb;
+  else confusion end;
+mem[head]←0; curnode←head; go to bigswitch end;
+
+[mmode+limsw] begin if type(curnode)≠opnoad then
+error(&quot;Limit switch must follow math operator&quot;)
+else mem[curnode]←mem[curnode] xor (1 lsh valued); go to bigswitch end;
+
+[hmode+italcorr] begin if curnode=head or type(curnode)≠charnode then
+error(&quot;Italic correction must follow an explicit character&quot;)
+else	begin comment compute italic correction; integer c,f,b,j;
+	c←info(curnode); f←c lsh -7; j←field(ms,fontinfo[c]);
+	if j then
+		begin b←getnode(boxnodesize);
+		width(b)←fmemreal(msbase[f]+j);
+		glueset(b)←epsilon; mem[b]←(hlistnode lsh typed);
+		mem[curnode]←mem[curnode]+b; curnode←b;
+		end;
+	end;
+spacefactor←1.0; go to bigswitch end;
+
+[mmode+vcenter] begin newsavelevel(endvcenter);
+pushnest; mode←-vmode; prevdepth←pflag; scanlb; go to bigswitch end;
+
+[vmode+hangindent][hmode+hangindent] begin hangwidth←scanlength;
+if scanstring(&quot;for&quot;) then begin hangbegin←scannumber; hangfirst←true end
+else if scanstring(&quot;after&quot;) then begin hangbegin←scannumber; hangfirst←false end
+else begin hangbegin←1; hangfirst←false end;
+go to bigswitch end;
+
+else go to fallthru
+  end;
+comment Ending of the main procedure;
+
+fallthru:error(&quot;You can't do that in &quot;&amp;decodemode(mode)&amp;&quot; mode&quot;); go to bigswitch;
+
+outputonly: error(&quot;This is allowed only in output routines&quot;); go to bigswitch;
+
+missingfont: pausing_on_errors←false # we're about to quit;
+error(&quot;Whoa, you have to define a font first&quot;); quit;
+
+missingbrace: if curcmd&gt;15 then curtok←hashentry
+	else curtok←(curcmd lsh cmdd)+curchar # prepare to back up input;
+if savestack[saveptr]=-mathcode then
+	begin backerror(&quot;Missing $ inserted&quot;); curcmd←mathbr;
+	end
+else if savestack[saveptr]=-mathleft then
+	begin integer q; backerror(&quot;Missing \right. inserted&quot;);
+	curcmd←leftright; curchar←rightnoad;
+	getavail(q); mem[q]←((otherchar lsh cmdd)+&quot;.&quot;) lsh infod; inslist(q);
+	end
+else	begin backerror(&quot;Missing } inserted&quot;); curcmd←rbrace;
+	end;
+saveptr←saveptr+1; curlev←curlev+level1 # undo damage of incorrect unsave;
+go to reswitch # try again with the missing character(s) supplied;
+
+scanbox: getncnext;
+if curcmd≠box then
+	begin if savestack[saveptr]=&quot;:&quot; and (curcmd=hrule or curcmd=vrule) then
+		begin comment \leaders\hrule or \leaders\vrule;
+		curbox←scanrulespec; go to boxend;
+		end;
+	error(&quot;A box specification was supposed to be here&quot;);
+	go to reswitch;
+	end;
+beginbox: comment At this point curcmd=box, curchar=0 or 1 or 1+vmode or 1+hmode,
+according as the first token of the box specification is \page, \box, \vjust,
+or \hjust, respectively. Also savestack[saveptr] contains either a shift amount
+(a signed real value) or one of the small integers &quot;0&quot; thru &quot;9&quot; (denoting \save)
+or the small integer &quot;:&quot; (denoting \leaders);
+if curchar&gt;1 then
+	begin pushnest # prepare for hjust or vjust;
+	if curchar=1+vmode then
+		begin mode←-vmode; prevdepth←pflag;
+		end
+	else	begin mode←-hmode; spacefactor←1.0;
+		end;
+	saveptr←saveptr+1 # not necessary to test saveptr&lt;savesize here;
+	scanspec # scan remainder of specification, put size parameter on savestack;
+	newsavelevel(justend) # this will send control to justbox when the } occurs;
+	go to bigswitch;
+	end;
+if curchar then
+	begin integer d; d←scandigit;
+	curbox←savedbox[d];savedbox[d]←0;
+	end
+else	begin if outputdormant then go to outputonly;
+	curbox←savedpage;savedpage←0;
+	end;
+go to boxend;
+
+justbox: begin comment At this point &quot;head&quot; points to the head of a list to
+be justified and savestack[saveptr+1] contains the associated length specification;
+real len; len←memory[location(savestack[saveptr+1]),real];
+if mode = -vmode then curbox←vpackage(head,len,false) comment finish vjust;
+else if len&lt;0 then
+	begin curbox←hpackage(head,len,false) # finish \hjust{ or \hjust expand...{;
+	dsnodelist(mem[inserts]);
+	end
+else	begin comment finish \hjust to ...{;
+	curbox←hpackage(head,len,true) # try to fit the stated size;
+	if curbox&lt;0 then
+		begin comment justify as several lines;
+		store(fillgluespec) # append fill glue as in end of paragraph;
+		mem[temphead]←mem[head]; mem[head]←0; curnode←head;
+		mode←-vmode; prevdepth←pflag # prepare for inter-line spacing;
+		justification(len, 1000000, 0.0);
+		curbox←vpackage(head,-epsilon,false);
+		end;
+	end;
+popnest; end # Now the program continues at boxend;
+
+boxend: comment At this point curbox points to a newly built box, possibly null, and
+savestack[saveptr] contains either a shift amount (a signed real value) or one
+of the small integers &quot;0&quot; thru &quot;9&quot; (denoting \save) or &quot;:&quot; (denoting \leaders);
+begin integer t; t←savestack[saveptr];
+if t≥&quot;0&quot; and t≤&quot;9&quot; then
+	begin if savedbox[t] then dsnodelist(savedbox[t]);
+	savedbox[t] ← curbox;
+	go to bigswitch;
+	end;
+if curbox then
+	begin if t=&quot;:&quot; then store((leadernode lsh typed)+(curbox lsh valued))
+	else	begin shiftamt(curbox)←memory[location(t),real];
+		if abs(mode)=mmode then go to makemathbox;
+		append(curbox);
+		end;
+	if mode=vmode then go to addtopage else go to bigswitch;
+	end;
+go to bigswitch end;
+
+simpleappend: comment At this point, curitem is a one-word item to be appended
+	to the current list;
+if abs(mode)=mmode then
+	begin comment In math mode, append a &quot;nodenoad&quot;;
+	integer p; getavail(p); mem[p]←curitem # deposit item into separate node;
+	store((p lsh valued)+(nodenoad lsh typed)); go to bigswitch;
+	end;
+store(curitem);
+if mode=vmode then go to addtopage else go to bigswitch;
+
+aligntest: comment We get here after the \cr of an alignment, or after \noalign{...};
+do getnctok until curcmd≠spacer;
+if curcmd=noalign then
+	begin comment insertion into the alignment;
+	scanlb;newsavelevel(noalignend) # the right brace will bring us back here;
+	go to bigswitch;
+	end;
+if curcmd=rbrace then
+	begin comment end of the alignment;
+	endalign;
+	if mode=vmode then go to addtopage;
+	if mode=mmode then
+		begin getnctok; if curcmd≠mathbr or mem[head] then
+		error(&quot;\halign in math mode must be preceded and followed by $$&quot;);
+		go to reswitch;
+		end;
+	go to bigswitch;
+	end;
+backinput # the token will reappear after the u1 tokenlist;
+startalignbox;
+startunsetnode;
+go to bigswitch;
+
+makemathbox: comment At this point curbox points to a sub-mlist which is to
+be made the operand of a new boxnoad and appended to the current mlist;
+curnoad←getnode(noadsize) # mem[curnoad] = boxnoad lsh typed, since boxnoad=0;
+operand(curnoad)←curbox;
+go to addtomlist;
+
+mathchar: comment At this point curchar consists of a 4-bit noad type
+followed by a 9-bit math character code, and we want to make it the
+operand of a new noad and append this to the current mlist;
+curnoad←getnode(noadsize);
+mem[curnoad]←(curchar land '17000) lsh (typed-9);
+operand(curnoad) ← (curchar land '777) lor flag;
+
+addtomlist: comment Now curnoad points to a noad that should be appended to
+the current mlist;
+mem[curnode]←mem[curnode]+curnoad; curnode←curnoad; go to bigswitch;
+
+scanmath: comment At this point the next portion of the input should be either
+a single character or &quot;{&lt;mlist&gt;}&quot;, and we want to put the corresponding
+operand code into the noad field whose address is in savestack[saveptr];
+do getnctok until curcmd≠spacer;
+if curcmd=letter or curcmd=otherchar then
+	begin curitem←flag+(mathdecode[curchar] land '777); go to scanmathend;
+	end;
+if curcmd=mathonly then
+	begin curitem←flag+(curchar land '777); go to scanmathend;
+	end;
+if curcmd=ascii then
+	begin curitem←flag+scannumber; go to scanmathend;
+	end;
+comment it wasn't a single character;
+if curcmd≠lbrace then
+	begin alignstate←alignstate+1; backerror(&quot;Missing { inserted&quot;);
+	end;
+saveptr←saveptr+1; newsavelevel(endscanmath); pushnest; incompleatnoad←0;
+go to bigswitch;
+
+scanmathend: mem[savestack[saveptr]]←curitem; go to bigswitch;
+
+topbotinsend: comment At this point the current vlist is to be converted into
+a topinsert or botinsert, according to whether -savestack[saveptr]=topinsend or
+botinsend, where topinsend=botinsend+1;
+begin integer p,q,t;
+t←(-savestack[saveptr]-botinsend) lsh typed;
+getavail(p);
+if t then
+	begin comment append topskip glue at end of vlist;
+	q←eqlink(topskip);
+	mem[p]←(q lsh valued)+(gluenode lsh typed);
+	mem[curnode]←mem[curnode]+p;
+	end
+else	begin comment insert botskip glue at beginning of vlist;
+	q←eqlink(botskip);
+	mem[p]←(q lsh valued)+(gluenode lsh typed)+mem[head];
+	mem[head]←p;
+	end;
+mem[q]←mem[q]+refct1;
+p←vpackage(head,-epsilon,false);
+q←getnode(gluespecsize);
+mem[q]←t+ufield(value,mem[p]);
+gluespace(q)←height(p)+depth(p);
+gluestretch(q)←str;
+glueshrink(q)←shr;
+freenode(p,boxnodesize);
+getavail(p); mem[p]←(insnode lsh typed)+(q lsh valued);
+popnest;
+if mode=vmode then
+	begin contrib←p; mem[q]←mem[q]+(2 lsh typed); go to addtopage;
+	end;
+mem[curnode]←mem[curnode]+p; curnode←p; go to bigswitch;
+end;
+
+addtopage: comment Now the page builder is in operation, it continues to
+work until contrib=0, then control will go back to bigswitch. The current
+semantic mode need not be vmode, it reflects the mode we should be in when
+bigswitch eventually takes over;
+if contrib=0 then
+	begin if nestptr=0 then curnode←contribhead
+	else curndstack[0]←contribhead # reset contribution list;
+	go to bigswitch;
+	end;
+if pagetail=pagehead then
+	begin comment Initialization of page building;
+	curbreak←0; curbadness←10.0^30;
+	pagesize←pagemem[vsizemem];
+	pagedepthmax←pagemem[maxdepthmem];
+	pagetopbl←pagemem[topbaselinemem];
+	pageheight←pagestretch←pageshrink←pagedepth←0.0;
+	end;
+
+begin comment The page builder adds the first node of the contribution list
+to the current page, checking to see if it is a decent place to break, and/or
+going to ejectpage if the current page is full;
+integer q,t;
+t←type(pagetail);
+case type(contrib) of begin
+[hlistnode][vlistnode][rulenode] begin
+pageheight←pageheight+pagedepth+height(contrib);
+pagedepth←depth(contrib);
+if pagedepth&gt;pagedepthmax then
+	begin pageheight←pageheight+pagedepth-pagedepthmax;
+	pagedepth←pagedepthmax;
+	end;
+if pagehead=pagetail and type(contrib)≠rulenode and pageheight&lt;pagetopbl then
+	begin comment Put glue at top of page to adjust first baseline;
+	integer q;
+	q←interlineglue(pagetopbl-pageheight,zeroglue);
+	pageheight←pagetopbl;
+	getavail(pagetail);mem[pagehead]←pagetail;
+	mem[pagetail]←(gluenode lsh typed)+(q lsh valued);
+	end end;
+[whatsitnode] pageext(contrib);
+[gluenode] begin integer q; case t of begin
+	[hlistnode][vlistnode][insnode] if testpagebreak(0.0) then go to ejectpage;
+	else comment don't try to break at this glue node;
+	  end;
+q←value(contrib) # pointer to glue specification;
+pageheight←pageheight+pagedepth+gluespace(q);
+pagedepth←0.0;
+pagestretch←pagestretch+gluestretch(q);
+pageshrink←pageshrink+glueshrink(q) end;
+[penaltynode] begin short integer n; n←penalty(contrib);
+if n&lt;infpen and testpagebreak(n/100.0) then go to ejectpage end;
+[ejectnode] begin t←contrib; contrib←link(t); freeavail(t);
+if pagetail≠pagehead then
+	begin comment Non-null page should be ejected;
+	if curbreak=0 then curbreak←pagetail # make sure there's a place to break;
+	if testpagebreak(-2.0) then go to ejectpage else go to ejectpage;
+	end;
+go to addtopage end;
+[insnode] begin curins←value(contrib);
+if mem[curins] land (2 lsh typed) and pagetail≠pagehead and
+   pageheight+gluespace(curins)&gt;pagesize+pageshrink+glueshrink(curins)+0.0001 then
+	begin mem[waitingtail]←mem[waitingtail]+contrib;
+	waitingtail←contrib; contrib←link(contrib); setlink(waitingtail,0);
+	go to addtopage;
+	end;
+pageheight←pageheight+gluespace(curins);
+pagestretch←pagestretch+gluestretch(curins);
+pageshrink←pageshrink+glueshrink(curins) end;
+[marknode][leadernode];
+else confusion
+  end;
+mem[pagetail]←mem[pagetail]+contrib # the contribution is contributed;
+pagetail←contrib;
+contrib←link(contrib); setlink(pagetail,0);
+if type(pagetail)=insnode and mem[curins] land (2 lsh typed) and testpagebreak(0.0) 
+then go to ejectpage else go to addtopage;
+end;
+
+ejectpage: comment Now curbreak specifies the best place to break the
+current page. We will break it there and ship it off to the output routine;
+begin integer t,r;
+mem[pagetail]←mem[pagetail]+contrib # temporarily join the lists;
+t←link(curbreak); setlink(curbreak,0);
+comment Now prune unwanted nodes at the break;
+while t do
+	begin case type(t) of begin
+	[gluenode] delgluelink(value(t));
+	[penaltynode];
+	else done
+	  end;
+	r←link(t); freeavail(t); t←r;
+	end;
+contrib←t;
+if mem[waitinghead] then
+	begin comment Put waiting inserts back onto contribution list;
+	mem[waitingtail]←mem[waitingtail]+contrib; contrib←mem[waitinghead];
+	mem[waitinghead]←0; waitingtail←waitinghead;
+	end;
+if topmark then delrclink(topmark);
+topmark←botmark; mem[botmark]←mem[botmark]+refct1;
+comment if botmark=0 this is okay, since fillglue is in mem[0];
+curbox←vpackage(pagehead,pagesize,true) # package the current page;
+mem[pagehead]←0; pagetail←pagehead;
+savedpageno←kount[&quot;0&quot;];
+if tracing land 2 then
+	begin print(nextline,&quot;Completed for page &quot;,savedpageno,&quot;:&quot;);
+	tracedump(curbox);
+	end;
+if outputroutine then
+	begin comment Fire up the output routine;
+	outputdormant←false;
+	pushnest; mode←-vmode; prevdepth←pflag;
+	newsavelevel(outputend);
+	insrclist(outputroutine);
+	savedpage←curbox;
+	go to bigswitch;
+	end;
+go to endpageout;
+end;
+
+endoutput: comment The output routine has ended;
+if mem[head] then curbox←vpackage(head,-epsilon,false) else curbox←0;
+popnest; outputdormant←true;
+if savedpage then
+	begin error(&quot;\output routine didn't use \page&quot;);
+	dsnodelist(savedpage); savedpage←0;
+	end;
+endpageout: if curbox then
+	begin comment It's time to send a page to the output medium;
+	print(&quot; [&quot;,savedpageno);
+	DEBUGONLY print(nextline,&quot;Memory before:&quot;,varused, &quot;,&quot;, dynused);
+	shipout(curbox); deadcycles←0;
+	dsnodelist(curbox);
+	DEBUGONLY print(&quot;. after:&quot;,varused, &quot;,&quot;, dynused);
+	print(&quot;]&quot;);
+	end
+else deadcycles←deadcycles+1;
+go to addtopage;
+end;
+end
+
+</PRE>
+</BODY>
+</HTML>
